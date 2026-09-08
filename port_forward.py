@@ -25,6 +25,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 
 import tkinter as tk
@@ -225,6 +226,142 @@ def get_wslconfig_networking_mode() -> str | None:
             if key.strip().lower() == "networkingmode":
                 mode = val.strip().lower()
     return mode
+
+
+def set_wslconfig_networking_mode(mode: str) -> None:
+    """%USERPROFILE%\\.wslconfig 의 [wsl2] 섹션을 지정된 네트워킹 모드로 설정한다.
+
+    mode == "mirrored":
+        [wsl2]
+        networkingMode=mirrored
+        dnsTunneling=true
+        firewall=true
+        autoProxy=true
+
+    mode == "nat":
+        [wsl2]
+        networkingMode=nat
+        (mirrored 전용 키인 dnsTunneling / firewall / autoProxy 는 제거)
+
+    기존 파일에 다른 섹션/키가 있다면 최대한 보존한다.
+    """
+    path = os.path.join(os.path.expanduser("~"), ".wslconfig")
+
+    if mode == "mirrored":
+        new_keys = {
+            "networkingMode": "mirrored",
+            "dnsTunneling": "true",
+            "firewall": "true",
+            "autoProxy": "true",
+        }
+        remove_keys: set[str] = set()
+    else:
+        new_keys = {
+            "networkingMode": "nat",
+        }
+        # mirrored 모드 전용 키는 nat 전환 시 제거한다.
+        remove_keys = {"dnstunneling", "firewall", "autoproxy"}
+
+    content = ""
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            content = ""
+
+    # 섹션 단위로 파싱 (다른 섹션/알 수 없는 키는 그대로 보존)
+    sections: list[tuple[str, list[str]]] = []
+    current_section = None
+    current_lines: list[str] = []
+
+    def flush():
+        if current_section is not None:
+            sections.append((current_section, current_lines[:]))
+
+    for raw_line in content.splitlines():
+        stripped = raw_line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            flush()
+            current_section = stripped.strip("[]").strip()
+            current_lines = []
+        elif current_section is not None:
+            current_lines.append(raw_line)
+        # 최초 섹션 선언 이전의 라인은 무시한다 (일반적으로 없음).
+    flush()
+
+    found_wsl2 = False
+    new_sections: list[tuple[str, list[str]]] = []
+    for name, lines in sections:
+        if name.strip().lower() == "wsl2":
+            found_wsl2 = True
+            kept_lines: list[str] = []
+            applied: set[str] = set()
+            for raw_line in lines:
+                s = raw_line.strip()
+                if not s or s.startswith(("#", ";")) or "=" not in s:
+                    kept_lines.append(raw_line)
+                    continue
+                key, _, _ = s.partition("=")
+                key_norm = key.strip().lower()
+                if key_norm in remove_keys:
+                    continue  # 다른 모드 전용 키 삭제
+                matched_new_key = None
+                for nk in new_keys:
+                    if nk.lower() == key_norm:
+                        matched_new_key = nk
+                        break
+                if matched_new_key:
+                    kept_lines.append(f"{matched_new_key}={new_keys[matched_new_key]}")
+                    applied.add(matched_new_key)
+                else:
+                    kept_lines.append(raw_line)  # 관리 대상이 아닌 키는 보존
+            for nk, nv in new_keys.items():
+                if nk not in applied:
+                    kept_lines.append(f"{nk}={nv}")
+            new_sections.append((name, kept_lines))
+        else:
+            new_sections.append((name, lines))
+
+    if not found_wsl2:
+        new_sections.append(("wsl2", [f"{k}={v}" for k, v in new_keys.items()]))
+
+    out_lines: list[str] = []
+    for name, lines in new_sections:
+        out_lines.append(f"[{name}]")
+        out_lines.extend(lines)
+        out_lines.append("")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(out_lines).rstrip() + "\n")
+
+    _log_command(f"(.wslconfig 갱신) [wsl2] networkingMode={mode}")
+
+
+def restart_wsl(distro: str = "Ubuntu", delay_sec: int = 5, on_wait=None):
+    """WSL을 종료(wsl --shutdown)하고 delay_sec초 대기 후 지정 배포판을 새 콘솔에서 실행.
+
+    on_wait: 대기 시작 시 호출할 콜백(선택). 백그라운드 스레드에서 호출되므로
+             UI 갱신이 필요하면 콜백 내부에서 적절히 after() 등을 사용해야 한다.
+    """
+    code, out, err = run_command("wsl --shutdown")
+
+    if on_wait:
+        try:
+            on_wait()
+        except Exception:
+            pass
+
+    time.sleep(delay_sec)
+
+    launch_cmd = f"wsl -d {distro}"
+    _log_command(launch_cmd)
+    subprocess.Popen(
+        ["wsl", "-d", distro],
+        creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0,
+    )
+
+    return code, out, err
 
 
 def get_windows_ipv4_addresses() -> list[str]:
@@ -682,8 +819,19 @@ class PortForwardApp(tk.Tk):
         self.mirror_label = ttk.Label(status_frame, text="Mirrored 네트워킹: 확인 중...")
         self.mirror_label.pack(side="left")
 
+        # Mirrored(on) / NAT(off) 전환 스위치
+        self.mirror_switch_var = tk.BooleanVar(value=False)
+        self.mirror_switch = ttk.Checkbutton(
+            status_frame,
+            text="Mirrored 모드 (해제 시 NAT)",
+            variable=self.mirror_switch_var,
+            command=self.on_toggle_mirror_switch,
+        )
+        self.mirror_switch.pack(side="left", padx=(10, 0))
+
         ttk.Button(status_frame, text="상태 새로고침", command=self.refresh_mirror_status).pack(side="left", padx=10)
         ttk.Button(status_frame, text="상세 보기", command=self.show_mirror_detail).pack(side="left")
+        ttk.Button(status_frame, text="변경 적용", command=self.apply_networking_change).pack(side="left", padx=(6, 0))
 
         # 테이블
         table_frame = ttk.Frame(parent, padding=(10, 0, 10, 10))
@@ -1077,10 +1225,85 @@ class PortForwardApp(tk.Tk):
         def done(result):
             working, detail = result
             self.last_mirror_detail = detail
+            # .wslconfig 상의 실제 설정값으로 on/off 스위치 상태를 동기화한다.
+            # (변수 set()은 command 콜백을 재호출하지 않으므로 순환 호출 걱정은 없다.)
+            self.mirror_switch_var.set(bool(detail.get("configured")))
             if working:
                 self.set_mirror_led("#2ecc71", "Mirrored 네트워킹: 정상 (녹색)")
             else:
                 self.set_mirror_led("#e74c3c", "Mirrored 네트워킹: 비정상 (빨강)")
+
+        self.run_bg(worker, on_done=done)
+
+    def on_toggle_mirror_switch(self):
+        """on/off 스위치 조작 시 .wslconfig 의 networkingMode 를 변경한다.
+        (실제 WSL에 적용하려면 '변경 적용' 버튼으로 재시작이 필요하다.)"""
+        turn_on = self.mirror_switch_var.get()
+        mode = "mirrored" if turn_on else "nat"
+        mode_label = "Mirrored" if turn_on else "NAT"
+
+        if not messagebox.askyesno(
+            "네트워킹 모드 변경",
+            f"WSL2 네트워킹 모드를 '{mode_label}' 로 설정합니다.\n"
+            f"(%USERPROFILE%\\.wslconfig 파일이 수정됩니다)\n\n"
+            f"실제로 적용하려면 이후 '변경 적용' 버튼으로 WSL을 재시작해야 합니다.\n"
+            f"계속할까요?",
+        ):
+            # 취소 시 스위치를 원래 상태로 되돌린다.
+            self.mirror_switch_var.set(not turn_on)
+            return
+
+        self.set_status(f"{mode_label} 모드로 .wslconfig 설정 중...")
+
+        def worker():
+            set_wslconfig_networking_mode(mode)
+            return mode
+
+        def done(result):
+            self.set_status("준비됨")
+            messagebox.showinfo(
+                "완료",
+                f".wslconfig 파일이 '{mode_label}' 모드로 설정되었습니다.\n"
+                f"'변경 적용' 버튼을 눌러 WSL을 재시작하면 실제로 적용됩니다.",
+            )
+            self.refresh_mirror_status()
+
+        self.run_bg(worker, on_done=done)
+
+    def apply_networking_change(self):
+        """'wsl --shutdown' 실행 후 5초 대기, 이어서 'wsl -d Ubuntu' 를 실행하여
+        변경된 .wslconfig 네트워킹 설정을 실제로 적용한다."""
+        if not messagebox.askyesno(
+            "변경 적용",
+            "WSL을 종료합니다 (wsl --shutdown).\n"
+            "5초 후 'wsl -d Ubuntu' 를 실행하여 다시 시작합니다.\n\n"
+            "현재 실행 중인 WSL 작업이 있다면 함께 종료됩니다. 계속할까요?",
+        ):
+            return
+
+        self.set_status("WSL 종료 중 (wsl --shutdown)...")
+
+        def on_wait():
+            self.after(0, lambda: self.set_status("5초 대기 중... (wsl -d Ubuntu 재시작 예정)"))
+
+        def worker():
+            return restart_wsl(distro="Ubuntu", delay_sec=5, on_wait=on_wait)
+
+        def done(result):
+            code, out, err = result
+            self.set_status("준비됨")
+            if code != 0:
+                messagebox.showwarning(
+                    "경고",
+                    f"'wsl --shutdown' 실행 중 문제가 있었습니다:\n{err or out}\n"
+                    f"(그래도 'wsl -d Ubuntu' 재시작을 시도했습니다)",
+                )
+            else:
+                messagebox.showinfo(
+                    "완료",
+                    "WSL을 재시작했습니다.\n(wsl --shutdown → 5초 대기 → wsl -d Ubuntu)",
+                )
+            self.refresh_mirror_status()
 
         self.run_bg(worker, on_done=done)
 
