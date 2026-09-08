@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import os
 import posixpath
 import re
@@ -364,6 +365,8 @@ class FileTransferDialog(tk.Toplevel):
         self.remote_favorite_var = tk.StringVar()
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_text_var = tk.StringVar(value="0%")
+        self.selected_terminal_command: dict | None = None
+        self.selected_terminal_var = tk.StringVar(value="터미널: 미선택")
 
         self.folder_icon = self._icon("#d9a441")
         self.file_icon = self._icon("#6f93c8")
@@ -502,6 +505,12 @@ class FileTransferDialog(tk.Toplevel):
             row=0, column=1, padx=(12, 0)
         )
         self._build_toolbar_buttons(toolbar, start_column=2)
+        toolbar.columnconfigure(40, weight=1)
+        self.selected_terminal_label = ttk.Label(
+            toolbar, textvariable=self.selected_terminal_var, foreground="#2b6cb0"
+        )
+        self.selected_terminal_label.grid(row=0, column=41, sticky="e")
+        ToolTip(self.selected_terminal_label, "터미널 아이콘 버튼 클릭 시 사용할 CLI 명령창")
 
         panes = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         panes.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
@@ -656,6 +665,50 @@ class FileTransferDialog(tk.Toplevel):
         tree.bind("<Double-1>", lambda event: self.open_clicked_folder(event, source))
         tree.bind("<Button-3>", lambda event: self.show_tree_menu(event, source))
 
+    def _add_terminal_menu(self, menu: tk.Menu, source: str) -> None:
+        """Add a '터미널' cascade listing saved command launchers. Selecting one
+        opens that CLI window, auto-connects (remote) and jumps to the current
+        '경로 이동' path, then remembers the choice for the 터미널 icon button
+        and shows it in the dialog's top bar."""
+        term_menu = tk.Menu(menu, tearoff=0)
+        commands = list(getattr(self.manager, "commands", []) or [])
+        if not commands:
+            term_menu.add_command(label="(등록된 command 없음)", state=tk.DISABLED)
+        else:
+            for command in commands:
+                name = command.get("name") or "(이름 없음)"
+                term_menu.add_command(
+                    label=name,
+                    command=lambda cmd=command, src=source: self.launch_terminal_with_command(cmd, src),
+                )
+        menu.add_cascade(label="터미널", menu=term_menu)
+
+    def _find_plink_command(self) -> dict | None:
+        """CLI 창을 서브메뉴로 선택하지 않은 경우 사용할 기본 launcher.
+        저장된 command 목록에서 'plink'가 포함된 항목(이름 또는 실행 파일명)을 찾는다."""
+        for command in getattr(self.manager, "commands", []) or []:
+            name = str(command.get("name", "")).lower()
+            path = str(command.get("path", "")).lower()
+            if "plink" in name or "plink" in Path(path).name:
+                return command
+        return None
+
+    def _resolve_terminal_launcher(self) -> dict | None:
+        if self.selected_terminal_command:
+            return self.selected_terminal_command
+        plink_command = self._find_plink_command()
+        if plink_command:
+            return plink_command
+        return self.manager.selected_command() if hasattr(self.manager, "selected_command") else None
+
+    def launch_terminal_with_command(self, command: dict, source: str) -> None:
+        self.selected_terminal_command = command
+        self.selected_terminal_var.set(f"터미널: {command.get('name', '')}")
+        if source == "remote":
+            self.manager.launch_remote(self.profile, command, cwd=self.remote_cwd)
+        elif hasattr(self.manager, "launch_command"):
+            self.manager.launch_command(command, cwd_override=str(self.local_cwd))
+
     def show_tree_menu(self, event, source: str) -> None:
         tree = event.widget
         row = tree.identify_row(event.y)
@@ -677,6 +730,8 @@ class FileTransferDialog(tk.Toplevel):
             menu.add_command(label="로그 보기(색상)", command=self.view_local_log_color)
             menu.add_command(label="파일명 변경", command=self.rename_local_selected)
             menu.add_command(label="삭제", command=self.delete_local_selected)
+            menu.add_separator()
+            self._add_terminal_menu(menu, "local")
         else:
             view_menu = tk.Menu(menu, tearoff=0)
             view_menu.add_command(label="(default)", command=self.view_remote_selected)
@@ -690,6 +745,8 @@ class FileTransferDialog(tk.Toplevel):
             menu.add_command(label="로그 보기(색상)", command=self.view_remote_log_color)
             menu.add_command(label="파일명 변경", command=self.rename_remote_selected)
             menu.add_command(label="삭제", command=self.delete_remote_selected)
+            menu.add_separator()
+            self._add_terminal_menu(menu, "remote")
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1025,7 +1082,7 @@ class FileTransferDialog(tk.Toplevel):
         self.status.set("로컬 항목 이름을 변경했습니다.")
 
     def open_local_terminal(self) -> None:
-        launcher = self.manager.selected_command() if hasattr(self.manager, "selected_command") else None
+        launcher = self._resolve_terminal_launcher()
         if launcher:
             self.manager.launch_command(launcher, cwd_override=str(self.local_cwd))
             return
@@ -1391,7 +1448,7 @@ class FileTransferDialog(tk.Toplevel):
         self.sftp.rmdir(remote_path)
 
     def open_remote_terminal(self) -> None:
-        launcher = self.manager.selected_command() if hasattr(self.manager, "selected_command") else None
+        launcher = self._resolve_terminal_launcher()
         self.manager.launch_remote(self.profile, launcher, cwd=self.remote_cwd)
 
     def capture_remote_screenshot(self) -> None:
@@ -1579,7 +1636,19 @@ class FileTransferDialog(tk.Toplevel):
         start_button.grid(row=0, column=0, padx=(0, 6))
         stop_button = ttk.Button(toolbar, text="중지", command=stop_log)
         stop_button.grid(row=0, column=1, padx=(0, 10))
-        ttk.Label(toolbar, textvariable=state_var).grid(row=0, column=2, sticky="w")
+
+        def clear_log() -> None:
+            text_widget.delete("1.0", "end")
+            if hasattr(text_widget, "_ansi_buffer"):
+                text_widget._ansi_buffer = ""
+            if hasattr(text_widget, "_ansi_fg"):
+                text_widget._ansi_fg = None
+            if hasattr(text_widget, "_ansi_bg"):
+                text_widget._ansi_bg = None
+
+        clear_button = ttk.Button(toolbar, text="지우기", command=clear_log)
+        clear_button.grid(row=0, column=2, padx=(0, 10))
+        ttk.Label(toolbar, textvariable=state_var).grid(row=0, column=3, sticky="w")
 
         frame = ttk.Frame(window, padding=8)
         frame.grid(row=1, column=0, sticky="nsew")
@@ -2045,6 +2114,7 @@ class DockerRunDialog(tk.Toplevel):
         self.resizable(False, False)
         self.result: dict | None = None
         initial = initial or {}
+        auto_filled = bool(initial.get("auto_filled"))
 
         self.name_var = tk.StringVar(value=initial.get("name", ""))
         self.image_var = tk.StringVar(value=initial.get("image", ""))
@@ -2056,30 +2126,53 @@ class DockerRunDialog(tk.Toplevel):
         frame.grid(row=0, column=0, sticky="nsew")
         frame.columnconfigure(0, weight=1)
 
-        ttk.Label(frame, text="컨테이너 이름").grid(row=0, column=0, sticky="w", pady=(0, 2))
-        ttk.Entry(frame, textvariable=self.name_var, width=48).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        row = 0
+        if auto_filled:
+            hint = ttk.Label(
+                frame,
+                text=(
+                    "아래 값은 선택한 컨테이너의 현재 실행 설정(docker inspect)에서\n"
+                    "자동으로 채워졌습니다. 내용을 확인하고 필요하면 직접 수정한 뒤 실행하세요."
+                ),
+                foreground="#2b6cb0",
+                justify="left",
+            )
+            hint.grid(row=row, column=0, sticky="w", pady=(0, 10))
+            row += 1
 
-        ttk.Label(frame, text="이미지 (예: blitz-admin-api:v18.6)").grid(row=2, column=0, sticky="w", pady=(0, 2))
-        ttk.Entry(frame, textvariable=self.image_var, width=48).grid(row=3, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(frame, text="컨테이너 이름").grid(row=row, column=0, sticky="w", pady=(0, 2))
+        row += 1
+        ttk.Entry(frame, textvariable=self.name_var, width=48).grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        row += 1
+
+        ttk.Label(frame, text="이미지 (예: blitz-admin-api:v18.6)").grid(row=row, column=0, sticky="w", pady=(0, 2))
+        row += 1
+        ttk.Entry(frame, textvariable=self.image_var, width=48).grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        row += 1
 
         ttk.Label(
             frame, text="포트 매핑 (쉼표로 구분, 예: 21391:3300, 62000-62003:62000-62003)"
-        ).grid(row=4, column=0, sticky="w", pady=(0, 2))
-        ttk.Entry(frame, textvariable=self.ports_var, width=48).grid(row=5, column=0, sticky="ew", pady=(0, 8))
+        ).grid(row=row, column=0, sticky="w", pady=(0, 2))
+        row += 1
+        ttk.Entry(frame, textvariable=self.ports_var, width=48).grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        row += 1
 
         ttk.Label(frame, text="추가 docker run 옵션 (선택, 예: -v /data:/data -e KEY=VALUE)").grid(
-            row=6, column=0, sticky="w", pady=(0, 2)
+            row=row, column=0, sticky="w", pady=(0, 2)
         )
-        ttk.Entry(frame, textvariable=self.extra_var, width=48).grid(row=7, column=0, sticky="ew", pady=(0, 8))
+        row += 1
+        ttk.Entry(frame, textvariable=self.extra_var, width=48).grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        row += 1
 
         ttk.Checkbutton(
             frame,
             text="동일한 이름의 기존 컨테이너가 있으면 먼저 중지 후 삭제",
             variable=self.remove_existing_var,
-        ).grid(row=8, column=0, sticky="w", pady=(0, 8))
+        ).grid(row=row, column=0, sticky="w", pady=(0, 8))
+        row += 1
 
         button_row = ttk.Frame(frame)
-        button_row.grid(row=9, column=0, sticky="e")
+        button_row.grid(row=row, column=0, sticky="e")
         ttk.Button(button_row, text="취소", command=self._cancel).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(button_row, text="실행", command=self._confirm).grid(row=0, column=1)
 
@@ -3050,14 +3143,106 @@ docker build --progress=plain --tag "$service:$version" "$context"
         self.run_streaming_command(f"Docker Build: {service_hint}", command, log_path=log_path)
 
     def run_docker_container(self) -> None:
-        """docker run -d --name ... -p ... <이미지> 를 원격 서버에서 실행하고 로그를 실시간으로 보여준다."""
+        """docker run -d --name ... -p ... <이미지> 를 원격 서버에서 실행하고 로그를 실시간으로 보여준다.
+        선택했거나 현재 탐색 중인 컨테이너가 있으면 docker inspect 결과를 참조해
+        이름/이미지/포트/추가 옵션을 자동으로 채워 넣고, 입력창은 그 값을
+        확인하거나 필요한 부분만 수정하는 용도로 사용한다."""
         container = self._selected_or_current_container()
-        initial = {}
-        if container:
-            initial["name"] = container["name"]
-        image_hint = self.last_docker_image_tag or self._docker_image_hint_from_path_entry()
-        if image_hint:
-            initial["image"] = image_hint
+        if not container:
+            initial = {}
+            image_hint = self.last_docker_image_tag or self._docker_image_hint_from_path_entry()
+            if image_hint:
+                initial["image"] = image_hint
+            self._open_docker_run_dialog(initial)
+            return
+
+        self.status.set(f"{container['name']} 컨테이너의 현재 설정을 확인하는 중 (docker inspect)...")
+
+        def worker() -> None:
+            config = self._fetch_container_run_config(container["id"])
+            initial = {"name": container["name"], "auto_filled": bool(config)}
+            if config:
+                if config.get("image"):
+                    initial["image"] = config["image"]
+                if config.get("ports"):
+                    initial["ports"] = config["ports"]
+                if config.get("extra"):
+                    initial["extra"] = config["extra"]
+            if "image" not in initial:
+                image_hint = self.last_docker_image_tag or self._docker_image_hint_from_path_entry()
+                if image_hint:
+                    initial["image"] = image_hint
+
+            def show() -> None:
+                self.status.set("")
+                self._open_docker_run_dialog(initial)
+
+            self.after(0, show)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _fetch_container_run_config(self, container_id: str) -> dict | None:
+        """`docker inspect <id>` 결과에서 docker run 재현에 필요한 값
+        (이미지, 포트 매핑, 볼륨/환경변수 등 추가 옵션)을 추출한다.
+        조회에 실패하면 None을 반환하며, 이 경우 호출부는 입력창을 빈 값으로 연다."""
+        if not self.client:
+            return None
+        command = "docker inspect " + shlex.quote(container_id)
+        try:
+            data, _err, exit_code = self._exec_with_sudo_fallback(command, timeout=15)
+        except Exception:
+            return None
+        if exit_code != 0:
+            return None
+        try:
+            parsed = json.loads(data.decode("utf-8", errors="replace"))
+        except Exception:
+            return None
+        if not parsed:
+            return None
+        info = parsed[0]
+        config = info.get("Config") or {}
+        host_config = info.get("HostConfig") or {}
+
+        image = config.get("Image", "") or ""
+
+        ports: list[str] = []
+        for container_port_proto, bindings in (host_config.get("PortBindings") or {}).items():
+            if not bindings:
+                continue
+            host_port = bindings[0].get("HostPort", "")
+            if not host_port:
+                continue
+            container_port, _sep, proto = container_port_proto.partition("/")
+            entry = f"{host_port}:{container_port}"
+            if proto and proto != "tcp":
+                entry += f"/{proto}"
+            ports.append(entry)
+
+        extra_tokens: list[str] = []
+        for bind in host_config.get("Binds") or []:
+            extra_tokens.append("-v " + shlex.quote(bind))
+        for env in config.get("Env") or []:
+            extra_tokens.append("-e " + shlex.quote(env))
+        restart_policy_info = host_config.get("RestartPolicy") or {}
+        restart_name = restart_policy_info.get("Name", "")
+        if restart_name and restart_name != "no":
+            if restart_name == "on-failure" and restart_policy_info.get("MaximumRetryCount"):
+                restart_name = f"on-failure:{restart_policy_info['MaximumRetryCount']}"
+            extra_tokens.append("--restart " + shlex.quote(restart_name))
+        network_mode = host_config.get("NetworkMode", "")
+        if network_mode and network_mode not in ("default", "bridge"):
+            extra_tokens.append("--network " + shlex.quote(network_mode))
+        if host_config.get("Privileged"):
+            extra_tokens.append("--privileged")
+
+        return {
+            "image": image,
+            "ports": ", ".join(ports),
+            "extra": " ".join(extra_tokens),
+        }
+
+    def _open_docker_run_dialog(self, initial: dict) -> None:
         dialog = DockerRunDialog(self, initial)
         self.wait_window(dialog)
         if not dialog.result:
@@ -3603,8 +3788,8 @@ class CommandSettingsDialog(tk.Toplevel):
     ):
         super().__init__(master)
         self.title(title)
-        self.geometry("860x460")
-        self.minsize(760, 400)
+        self.geometry("860x500")
+        self.minsize(760, 440)
         self.heading = heading
         self.browse_title = browse_title
         self.commands = [dict(command) for command in commands]
@@ -3615,6 +3800,7 @@ class CommandSettingsDialog(tk.Toplevel):
         self.path_var = tk.StringVar()
         self.args_var = tk.StringVar()
         self.workdir_var = tk.StringVar()
+        self.init_cmd_var = tk.StringVar()
 
         self._build()
         self._refresh()
@@ -3660,15 +3846,24 @@ class CommandSettingsDialog(tk.Toplevel):
             ("실행 파일", self.path_var, self.browse_executable),
             ("실행 인자", self.args_var, None),
             ("작업 폴더", self.workdir_var, self.browse_workdir),
+            ("초기화 명령어", self.init_cmd_var, None),
         ]
+        last_row = 0
         for row, (label, var, browse) in enumerate(fields):
+            last_row = row
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", pady=5)
             ttk.Entry(form, textvariable=var).grid(row=row, column=1, sticky="ew", pady=5)
             if browse:
                 ttk.Button(form, text="찾기", command=browse).grid(row=row, column=2, padx=(6, 0), pady=5)
+        ttk.Label(
+            form,
+            text="원격 서버 CLI 접속 직후 자동 실행됩니다. 여러 명령은 ';'로 구분하세요.\n예: export DISPLAY=:0",
+            foreground="#718096",
+            justify="left",
+        ).grid(row=last_row + 1, column=0, columnspan=3, sticky="w", pady=(0, 5))
 
         actions = ttk.Frame(form)
-        actions.grid(row=4, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        actions.grid(row=last_row + 2, column=0, columnspan=3, sticky="ew", pady=(14, 0))
         ttk.Button(actions, text="추가/저장", command=self.save_current).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(actions, text="새 항목", command=self.clear_form).grid(row=0, column=1, padx=(0, 6))
         ttk.Button(actions, text="삭제", command=self.delete_current).grid(row=0, column=2)
@@ -3699,6 +3894,7 @@ class CommandSettingsDialog(tk.Toplevel):
         self.path_var.set(command.get("path", ""))
         self.args_var.set(command.get("args", ""))
         self.workdir_var.set(command.get("workdir", ""))
+        self.init_cmd_var.set(command.get("init_cmd", ""))
 
     def browse_executable(self) -> None:
         path = filedialog.askopenfilename(
@@ -3725,12 +3921,14 @@ class CommandSettingsDialog(tk.Toplevel):
         self.path_var.set("")
         self.args_var.set("")
         self.workdir_var.set("")
+        self.init_cmd_var.set("")
 
     def save_current(self) -> bool:
         name = self.name_var.get().strip()
         path = self.path_var.get().strip()
         args = self.args_var.get().strip()
         workdir = self.workdir_var.get().strip()
+        init_cmd = self.init_cmd_var.get().strip()
         if not name or not path:
             messagebox.showerror("입력 오류", "이름과 실행 파일은 필수입니다.", parent=self)
             return False
@@ -3747,6 +3945,7 @@ class CommandSettingsDialog(tk.Toplevel):
             "path": path,
             "args": args,
             "workdir": workdir,
+            "init_cmd": init_cmd,
         }
         for index, existing in enumerate(self.commands):
             if existing.get("id") == command["id"]:
@@ -4283,9 +4482,12 @@ class CommandManager(tk.Tk):
         self.status.set("로컬 PowerShell 창을 열었습니다.")
 
     def launch_remote(self, profile: dict, launcher: dict | None = None, cwd: str = "") -> None:
+        init_cmd = (launcher.get("init_cmd") or "").strip() if launcher else ""
         cli_command = [sys.executable, str(ROOT / "ssh_cli.py"), "--profile-id", profile["id"]]
         if cwd:
             cli_command.extend(["--cwd", cwd])
+        if init_cmd:
+            cli_command.extend(["--init-cmd", init_cmd])
         cli_command_line = subprocess.list2cmdline(cli_command)
         if launcher is None:
             subprocess.Popen(cli_command, creationflags=subprocess.CREATE_NEW_CONSOLE, cwd=str(ROOT))
@@ -4300,6 +4502,17 @@ class CommandManager(tk.Tk):
         if workdir and not Path(workdir).is_dir():
             messagebox.showerror("실행 실패", "선택한 command 작업 폴더가 존재하지 않습니다.", parent=self)
             return
+
+        def build_remote_shell_command() -> str:
+            # export 등으로 지정한 환경변수는 뒤에 실행되는 bash(대화형 쉘)에 그대로
+            # 상속되므로 초기화 명령어를 cd보다 앞에 실행한다.
+            segments = []
+            if init_cmd:
+                segments.append(init_cmd)
+            if cwd:
+                segments.append(f"cd {shell_quote(cwd)}")
+            segments.append("bash")
+            return " ; ".join(segments)
 
         try:
             launcher_args = shlex.split(launcher.get("args", ""), posix=False)
@@ -4319,10 +4532,22 @@ class CommandManager(tk.Tk):
                     "-l",
                     profile["username"],
                 ]
+                if cwd or init_cmd:
+                    # -t 로 pty를 강제 할당해 원격 쉘 명령(초기화 명령어/경로 이동)을
+                    # 실행한 뒤에도 대화형 bash 세션이 유지되게 한다.
+                    command.extend(["-t", build_remote_shell_command()])
+
+                def _insert_before_remote_command(opts: list[str]) -> None:
+                    if "-t" in command:
+                        idx = command.index("-t")
+                        command[idx:idx] = opts
+                    else:
+                        command.extend(opts)
+
                 if password:
-                    command.extend(["-pw", password])
+                    _insert_before_remote_command(["-pw", password])
                 if key_path:
-                    command.extend(["-i", key_path])
+                    _insert_before_remote_command(["-i", key_path])
             elif executable_name == "plink.exe":
                 auth = self._password_for_profile(profile)
                 if not auth:
@@ -4330,7 +4555,7 @@ class CommandManager(tk.Tk):
                 profile, password, key_path = auth
                 if "-no-antispoof" not in {arg.lower() for arg in launcher_args}:
                     launcher_args.append("-no-antispoof")
-                remote_shell_command = f"cd {shell_quote(cwd)} ; bash" if cwd else "bash"
+                remote_shell_command = build_remote_shell_command()
                 command = [
                     path,
                     *launcher_args,
