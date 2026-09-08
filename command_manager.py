@@ -2317,6 +2317,8 @@ class DockerTransferDialog(FileTransferDialog):
         icons["docker_run"] = self._docker_action_icon("run")
         icons["docker_history"] = self._docker_action_icon("history")
         icons["docker_nginx_reload"] = self._docker_action_icon("reload")
+        icons["docker_image_rebuild"] = self._docker_action_icon("image_rebuild")
+        icons["docker_swarm_update"] = self._docker_action_icon("swarm_update")
         return icons
 
     def _docker_action_icon(self, shape: str) -> tk.PhotoImage:
@@ -2350,6 +2352,19 @@ class DockerTransferDialog(FileTransferDialog):
             image.put("#2f855a", to=(4, 7, 6, 12))
             image.put("#2f855a", to=(11, 2, 14, 5))
             image.put("#2f855a", to=(2, 11, 5, 14))
+        elif shape == "image_rebuild":
+            # 이미지 레이어(사각형 3겹) + 우측 상단의 재빌드 화살표
+            image.put("#bee3f8", to=(2, 9, 11, 13))
+            image.put("#63b3ed", to=(3, 6, 12, 10))
+            image.put("#3182ce", to=(4, 3, 13, 7))
+            image.put("#2f855a", to=(11, 1, 15, 4))
+        elif shape == "swarm_update":
+            # Swarm 클러스터(노드 3개 + 연결선)를 나타내는 보라색 아이콘
+            image.put("#805ad5", to=(2, 2, 6, 6))
+            image.put("#805ad5", to=(10, 2, 14, 6))
+            image.put("#805ad5", to=(6, 10, 10, 14))
+            image.put("#553c9a", to=(6, 5, 10, 7))
+            image.put("#553c9a", to=(6, 7, 8, 10))
         return image
 
     def _build_toolbar_buttons(self, toolbar: ttk.Frame, start_column: int = 2) -> None:
@@ -2412,6 +2427,8 @@ class DockerTransferDialog(FileTransferDialog):
             ("docker_build", "Docker 컨테이너 빌드", self.build_docker_image),
             ("docker_run", "Docker 컨테이너 run", self.run_docker_container),
             ("docker_nginx_reload", "Nginx 서비스 재로드", self.reload_nginx_selected_container),
+            ("docker_image_rebuild", "이미지 재빌드", self.rebuild_docker_image_latest),
+            ("docker_swarm_update", "Swarm 서비스 업데이트", self.update_swarm_service_latest),
             ("docker_history", "컨테이너 탐색 기록 보기", lambda: self.view_container_explore_log()),
         ]
         for column, (icon, tooltip, command) in enumerate(remote_actions):
@@ -2887,6 +2904,8 @@ class DockerTransferDialog(FileTransferDialog):
                 menu.add_command(label="Docker 컨테이너 빌드", command=self.build_docker_image)
                 menu.add_command(label="Docker 컨테이너 run", command=self.run_docker_container)
                 menu.add_command(label="Nginx 서비스 재로드", command=self.reload_nginx_selected_container)
+                menu.add_command(label="이미지 재빌드", command=self.rebuild_docker_image_latest)
+                menu.add_command(label="Swarm 서비스 업데이트", command=self.update_swarm_service_latest)
                 menu.add_separator()
                 menu.add_command(label="새로 고침", command=self.refresh_remote)
                 try:
@@ -3139,6 +3158,119 @@ class DockerTransferDialog(FileTransferDialog):
         messagebox.showinfo(
             "Nginx 재로드 완료",
             f"'{container['name']}' 컨테이너에서 Nginx 설정을 재로드했습니다.",
+            parent=self,
+        )
+
+    def rebuild_docker_image_latest(self) -> None:
+        """현재 [Docker:컨테이너] 경로 탐색 중인 폴더에 Dockerfile이 있으면
+        그 폴더를 빌드 컨텍스트로 삼아 <서비스명>:latest 태그로 이미지를 재빌드한다.
+        (docker build -t <서비스명>:latest .)"""
+        build_context = self._docker_build_context_from_path_entry()
+        if not build_context:
+            messagebox.showinfo(
+                "이미지 재빌드",
+                "이미지 재빌드는 Docker 컨테이너 내부 경로에서만 실행할 수 있습니다.\n"
+                "Docker 컨테이너를 더블클릭하여 Dockerfile이 있는 폴더로 이동한 뒤 다시 실행하세요.",
+                parent=self,
+            )
+            return
+        container_id = build_context["container_id"]
+        container_path = build_context["path"]
+        service = posixpath.basename(container_path.rstrip("/")) or "image"
+        image_tag = f"{service}:latest"
+
+        if not messagebox.askyesno(
+            "이미지 재빌드",
+            f"[Docker:{build_context['container_name']}] {container_path} 경로에 Dockerfile이 있는지 확인 후\n"
+            f"'{image_tag}' 태그로 이미지를 재빌드할까요?\n(docker build -t {image_tag} .)",
+            parent=self,
+        ):
+            return
+
+        script = """
+set -e
+container_id="$1"
+container_path="$2"
+image_tag="$3"
+service=$(basename "$container_path")
+work_root=$(mktemp -d /tmp/command_manager_image_rebuild.XXXXXX)
+trap 'rm -rf "$work_root"' EXIT
+context="$work_root/$service"
+docker cp "$container_id:$container_path" "$context"
+if [ ! -f "$context/Dockerfile" ]; then
+  echo "Dockerfile을 찾을 수 없습니다: $container_path/Dockerfile" >&2
+  exit 1
+fi
+cd "$context"
+docker build --progress=plain -t "$image_tag" .
+""".strip()
+        command = (
+            "bash -lc "
+            + shlex.quote(script)
+            + " -- "
+            + shlex.quote(container_id)
+            + " "
+            + shlex.quote(container_path)
+            + " "
+            + shlex.quote(image_tag)
+        )
+        self.last_docker_image_tag = image_tag
+        log_path = self._docker_build_log_path(service)
+        self.run_streaming_command(f"이미지 재빌드: {service}", command, log_path=log_path)
+
+    def update_swarm_service_latest(self) -> None:
+        """탐색 중인 [Docker:컨테이너] 경로 또는 선택/탐색 중인 컨테이너의 이름을
+        서비스명으로 간주해 Swarm 서비스를 <서비스명>:latest 이미지로 업데이트한다.
+        (docker service update --image <서비스명>:latest <서비스명>)"""
+        build_context = self._docker_build_context_from_path_entry()
+        container = self._selected_or_current_container()
+        if build_context:
+            service = posixpath.basename(build_context["path"].rstrip("/")) or None
+        elif container:
+            service = container.get("name")
+        else:
+            service = None
+        if not service:
+            messagebox.showinfo(
+                "Swarm 서비스 업데이트",
+                "업데이트할 서비스를 확인할 수 없습니다.\n"
+                "컨테이너를 원격 목록에서 선택하거나, 해당 컨테이너(또는 Dockerfile 폴더) 내부를 탐색 중이어야 합니다.",
+                parent=self,
+            )
+            return
+        image_tag = f"{service}:latest"
+        command_text = f"docker service update --image {image_tag} {service}"
+
+        if not messagebox.askyesno(
+            "Swarm 서비스 업데이트",
+            f"'{service}' 서비스를 '{image_tag}' 이미지로 업데이트할까요?\n({command_text})",
+            parent=self,
+        ):
+            return
+        self.status.set(f"{service} Swarm 서비스를 업데이트하는 중...")
+
+        def worker() -> None:
+            try:
+                command = (
+                    "docker service update --image "
+                    + shlex.quote(image_tag)
+                    + " "
+                    + shlex.quote(service)
+                )
+                self._run_remote_ok(command, timeout=120)
+            except Exception as exc:
+                detail = str(exc)
+                self.after(0, lambda: self._container_action_failed("Swarm 서비스 업데이트", detail))
+                return
+            self.after(0, lambda: self._swarm_service_updated(service, image_tag))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _swarm_service_updated(self, service: str, image_tag: str) -> None:
+        self.status.set(f"{service} 서비스를 {image_tag} 로 업데이트했습니다.")
+        messagebox.showinfo(
+            "Swarm 서비스 업데이트 완료",
+            f"'{service}' 서비스를 '{image_tag}' 이미지로 업데이트했습니다.",
             parent=self,
         )
 
@@ -4195,31 +4327,34 @@ class CommandManager(tk.Tk):
         ttk.Button(sidebar, text="로컬 PowerShell", command=self.open_powershell).grid(
             row=2, column=0, sticky="ew", pady=3
         )
-        ttk.Button(sidebar, text="Command 설정", command=self.open_command_settings).grid(
+        ttk.Button(sidebar, text="비활성 쉘 제거", command=self.remove_inactive_shells).grid(
             row=3, column=0, sticky="ew", pady=3
         )
-        ttk.Button(sidebar, text="Editor 설정", command=self.open_editor_settings).grid(
+        ttk.Button(sidebar, text="Command 설정", command=self.open_command_settings).grid(
             row=4, column=0, sticky="ew", pady=3
         )
-        ttk.Separator(sidebar).grid(row=5, column=0, sticky="ew", pady=12)
-        ttk.Button(sidebar, text="서버 추가/로그인", command=self.add_profile).grid(
-            row=6, column=0, sticky="ew", pady=3
+        ttk.Button(sidebar, text="Editor 설정", command=self.open_editor_settings).grid(
+            row=5, column=0, sticky="ew", pady=3
         )
-        ttk.Button(sidebar, text="선택 서버 로그인", command=self.login_selected).grid(
+        ttk.Separator(sidebar).grid(row=6, column=0, sticky="ew", pady=12)
+        ttk.Button(sidebar, text="서버 추가/로그인", command=self.add_profile).grid(
             row=7, column=0, sticky="ew", pady=3
         )
-        ttk.Button(sidebar, text="선택 서버 수정", command=self.edit_selected).grid(
+        ttk.Button(sidebar, text="선택 서버 로그인", command=self.login_selected).grid(
             row=8, column=0, sticky="ew", pady=3
         )
-        ttk.Button(sidebar, text="파일 전송", command=self.open_transfer_explorer).grid(
+        ttk.Button(sidebar, text="선택 서버 수정", command=self.edit_selected).grid(
             row=9, column=0, sticky="ew", pady=3
         )
-        ttk.Button(sidebar, text="Docker", command=self.open_docker_explorer).grid(
+        ttk.Button(sidebar, text="파일 전송", command=self.open_transfer_explorer).grid(
             row=10, column=0, sticky="ew", pady=3
         )
-        ttk.Separator(sidebar).grid(row=11, column=0, sticky="ew", pady=12)
-        ttk.Button(sidebar, text="수정", command=self.edit_selected).grid(row=12, column=0, sticky="ew", pady=3)
-        ttk.Button(sidebar, text="삭제", command=self.delete_selected).grid(row=13, column=0, sticky="ew", pady=3)
+        ttk.Button(sidebar, text="Docker", command=self.open_docker_explorer).grid(
+            row=11, column=0, sticky="ew", pady=3
+        )
+        ttk.Separator(sidebar).grid(row=12, column=0, sticky="ew", pady=12)
+        ttk.Button(sidebar, text="수정", command=self.edit_selected).grid(row=13, column=0, sticky="ew", pady=3)
+        ttk.Button(sidebar, text="삭제", command=self.delete_selected).grid(row=14, column=0, sticky="ew", pady=3)
 
         main = ttk.Frame(self, padding=16)
         main.grid(row=0, column=1, sticky="nsew")
@@ -4612,6 +4747,57 @@ class CommandManager(tk.Tk):
         executable = shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
         subprocess.Popen([executable], creationflags=subprocess.CREATE_NEW_CONSOLE)
         self.status.set("로컬 PowerShell 창을 열었습니다.")
+
+    def remove_inactive_shells(self) -> None:
+        # PuTTY 등은 원격 세션이 끊어지면 창 제목에 "(inactive)"를 붙인다.
+        # 해당 제목을 가진 창(=비활성 쉘) 프로세스를 찾아 강제 종료한다.
+        self.status.set("비활성 쉘을 찾는 중...")
+
+        script = (
+            "$procs = Get-Process | Where-Object {\n"
+            "    $hwnd = $_.MainWindowHandle\n"
+            "    if ($hwnd -ne 0) {\n"
+            "        $title = $_.MainWindowTitle\n"
+            "        $title -like '*(inactive)*'\n"
+            "    } else {\n"
+            "        $false\n"
+            "    }\n"
+            "}\n"
+            "$count = ($procs | Measure-Object).Count\n"
+            "$procs | ForEach-Object { Stop-Process -Id $_.Id -Force }\n"
+            "Write-Output $count\n"
+        )
+
+        def worker() -> None:
+            executable = shutil.which("pwsh") or shutil.which("powershell") or "powershell.exe"
+            try:
+                result = subprocess.run(
+                    [executable, "-NoProfile", "-NonInteractive", "-Command", script],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+            except Exception as exc:
+                detail = str(exc)
+                self.after(0, lambda: self.status.set(f"비활성 쉘 제거 실패: {detail}"))
+                return
+
+            output_lines = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+            count_text = output_lines[-1] if output_lines else ""
+            if not count_text.isdigit():
+                detail = (result.stderr or "제거 결과를 확인할 수 없습니다.").strip()
+                self.after(0, lambda: self.status.set(f"비활성 쉘 제거 실패: {detail}"))
+                return
+
+            count = int(count_text)
+            if count > 0:
+                message = f"비활성 쉘 {count}개를 제거했습니다."
+            else:
+                message = "제거할 비활성 쉘이 없습니다."
+            self.after(0, lambda: self.status.set(message))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def launch_remote(self, profile: dict, launcher: dict | None = None, cwd: str = "") -> None:
         init_cmd = (launcher.get("init_cmd") or "").strip() if launcher else ""
