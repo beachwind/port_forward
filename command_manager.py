@@ -33,6 +33,7 @@ from crypto_store import (
 
 
 ROOT = Path(__file__).resolve().parent
+DOCKER_LOG_DIR = ROOT / "docker_logs"
 
 
 def powershell_quote(value: str) -> str:
@@ -2141,6 +2142,7 @@ class DockerTransferDialog(FileTransferDialog):
         icons["docker_stop"] = self._docker_action_icon("stop")
         icons["docker_build"] = self._docker_action_icon("build")
         icons["docker_run"] = self._docker_action_icon("run")
+        icons["docker_history"] = self._docker_action_icon("history")
         return icons
 
     def _docker_action_icon(self, shape: str) -> tk.PhotoImage:
@@ -2160,6 +2162,12 @@ class DockerTransferDialog(FileTransferDialog):
             image.put("#2f855a", to=(7, 5, 9, 11))
             image.put("#2f855a", to=(9, 6, 11, 10))
             image.put("#2f855a", to=(11, 7, 12, 9))
+        elif shape == "history":
+            # 시계 모양(테두리 + 시침/분침)으로 탐색 기록(로그) 버튼을 표현한다.
+            image.put("#2b6cb0", to=(3, 3, 13, 13))
+            image.put("#f7fafc", to=(4, 4, 12, 12))
+            image.put("#2b6cb0", to=(7, 5, 9, 8))
+            image.put("#2b6cb0", to=(8, 7, 11, 9))
         return image
 
     def _build_remote_pane(self, parent: ttk.Frame) -> None:
@@ -2208,6 +2216,7 @@ class DockerTransferDialog(FileTransferDialog):
             ("docker_stop", "Docker 컨테이너 중지", self.stop_selected_container),
             ("docker_build", "Docker 컨테이너 빌드", self.build_docker_image),
             ("docker_run", "Docker 컨테이너 run", self.run_docker_container),
+            ("docker_history", "컨테이너 탐색 기록 보기", lambda: self.view_container_explore_log()),
         ]
         for column, (icon, tooltip, command) in enumerate(remote_actions):
             self._icon_button(action_group, icon, tooltip, command, 0, column)
@@ -2320,6 +2329,8 @@ class DockerTransferDialog(FileTransferDialog):
         tree = self._tree_widget(self.remote_tree)
         container_id = self.container_context["id"]
         base_path = self.container_context["path"]
+        container_name = self.container_context.get("name", container_id)
+        self._append_docker_explore_log(container_id, container_name, base_path, entries, error)
         for entry in entries:
             full_path = posixpath.join(base_path, entry["name"])
             tree.insert(
@@ -2556,6 +2567,7 @@ class DockerTransferDialog(FileTransferDialog):
                 menu.add_command(label="폴더 열기", command=lambda: self.open_remote_item(row))
                 menu.add_command(label="컨테이너 정보 보기", command=lambda: self.show_container_details(row))
                 menu.add_command(label="로그 보기(docker logs)", command=lambda: self.view_container_logs(row))
+                menu.add_command(label="탐색 기록 보기(폴더/파일 목록)", command=lambda: self.view_container_explore_log(row))
                 menu.add_separator()
                 menu.add_command(label="Docker 컨테이너 중지", command=self.stop_selected_container)
                 menu.add_command(label="Docker 컨테이너 빌드", command=self.build_docker_image)
@@ -2573,6 +2585,7 @@ class DockerTransferDialog(FileTransferDialog):
                 menu = tk.Menu(self, tearoff=0)
                 label = "열기" if kind == "컨테이너 폴더" else "파일 보기"
                 menu.add_command(label=label, command=lambda: self.open_remote_item(row))
+                menu.add_command(label="탐색 기록 보기(폴더/파일 목록)", command=lambda: self.view_container_explore_log())
                 menu.add_command(label="새로 고침", command=self.refresh_remote)
                 try:
                     menu.tk_popup(event.x_root, event.y_root)
@@ -2629,6 +2642,85 @@ class DockerTransferDialog(FileTransferDialog):
     def _container_action_failed(self, action: str, detail: str) -> None:
         self.status.set(f"{action} 실패: {detail}")
         messagebox.showerror(action, detail, parent=self)
+
+    # ------------------------------------------------------------------
+    # 컨테이너 탐색(폴더/파일 목록) 로컬 로그 기록 / 보기
+    #
+    # 컨테이너를 클릭해 진입하거나 컨테이너 내부에서 폴더를 이동할 때마다
+    # (내부적으로 docker exec 로 목록을 조회할 때마다) 조회 결과를
+    # 로컬 파일(docker_logs/<컨테이너>.log)에 이력으로 남긴다.
+    # ------------------------------------------------------------------
+    def _docker_explore_log_path(self, container_id: str, container_name: str) -> Path:
+        DOCKER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", container_name or container_id).strip() or container_id
+        short_id = (container_id or "unknown")[:12]
+        return DOCKER_LOG_DIR / f"{safe_name}_{short_id}.log"
+
+    def _append_docker_explore_log(
+        self,
+        container_id: str,
+        container_name: str,
+        path: str,
+        entries: list[dict],
+        error: str,
+    ) -> None:
+        """컨테이너 내부 폴더/파일 목록 조회 결과를 로컬 로그 파일에 추가 기록한다.
+        로그 기록 자체가 실패하더라도 탐색 기능에는 영향을 주지 않도록 예외를 삼킨다."""
+        try:
+            log_path = self._docker_explore_log_path(container_id, container_name)
+            server_label = self.profile.get("name") or self.profile.get("host", "")
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            lines = [f"[{timestamp}] 서버: {server_label}  컨테이너: {container_name} ({container_id})  경로: {path}"]
+            if error:
+                lines.append(f"  (목록 조회 실패: {error})")
+            elif not entries:
+                lines.append("  (빈 폴더)")
+            else:
+                for entry in entries:
+                    if entry.get("is_dir"):
+                        lines.append(f"  [D] {entry['name']}")
+                    else:
+                        size = human_size(entry.get("size"))
+                        modified = entry.get("modified") or ""
+                        lines.append(f"  [F] {entry['name']}  {size}  {modified}".rstrip())
+            lines.append("-" * 60)
+            with open(log_path, "a", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+        except Exception:
+            pass
+
+    def view_container_explore_log(self, item: str | None = None) -> None:
+        """선택/탐색 중인 컨테이너의 폴더·파일 목록 조회 이력을 보여준다.
+        item이 주어지면 해당 컨테이너 행 기준, 아니면 현재 탐색 중이거나
+        선택된 컨테이너 기준으로 로그를 찾는다."""
+        container_id = None
+        container_name = None
+        if item:
+            container_id = self._container_id_from_item(item)
+            if container_id:
+                container_name = self._tree_widget(self.remote_tree).item(item, "text")
+        if not container_id:
+            if self.container_context is not None:
+                container_id = self.container_context["id"]
+                container_name = self.container_context.get("name", container_id)
+            else:
+                current = self._selected_or_current_container()
+                if current:
+                    container_id = current["id"]
+                    container_name = current["name"]
+        if not container_id:
+            messagebox.showinfo(
+                "탐색 기록 보기",
+                "기록을 볼 컨테이너를 원격 목록에서 선택하거나, 해당 컨테이너 내부를 탐색 중이어야 합니다.",
+                parent=self,
+            )
+            return
+        log_path = self._docker_explore_log_path(container_id, container_name or container_id)
+        if not log_path.exists():
+            messagebox.showinfo("탐색 기록 보기", "아직 기록된 탐색 로그가 없습니다.", parent=self)
+            return
+        data = log_path.read_bytes()
+        self.show_file_viewer(f"{container_name or container_id} 컨테이너 탐색 기록", data)
 
     # ------------------------------------------------------------------
     # Docker 컨테이너 중지 / 빌드 / run
