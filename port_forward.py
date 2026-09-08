@@ -19,6 +19,7 @@ netsh interface portproxy / Windows 방화벽 규칙을 GUI에서 관리합니�
 import ctypes
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -28,6 +29,23 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), "port_forward_rules.json")
+
+# 버튼 액션에서 실제 실행되는 명령어를 GUI 상태바에 표시하기 위한 콜백
+_command_logger = None
+
+
+def set_command_logger(callback):
+    """GUI가 실행되는 명령어 문자열을 전달받을 콜백을 등록."""
+    global _command_logger
+    _command_logger = callback
+
+
+def _log_command(cmd: str):
+    if _command_logger:
+        try:
+            _command_logger(cmd)
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------
@@ -53,6 +71,7 @@ def relaunch_as_admin():
 # 명령 실행 유틸
 # ------------------------------------------------------------------
 def run_command(cmd: str) -> tuple[int, str, str]:
+    _log_command(cmd)
     result = subprocess.run(
         ["cmd", "/c", cmd],
         capture_output=True,
@@ -65,6 +84,7 @@ def run_command(cmd: str) -> tuple[int, str, str]:
 
 
 def run_powershell(cmd: str) -> tuple[int, str, str]:
+    _log_command(f"powershell -Command \"{cmd}\"")
     result = subprocess.run(
         ["powershell", "-NoProfile", "-Command", cmd],
         capture_output=True,
@@ -169,6 +189,95 @@ def get_wsl2_ip():
 
 
 # ------------------------------------------------------------------
+# WSL2 mirrored 네트워킹 모드 확인
+# ------------------------------------------------------------------
+def get_wslconfig_networking_mode() -> str | None:
+    """%USERPROFILE%\\.wslconfig 의 [wsl2] 섹션에서 networkingMode 값을 읽는다."""
+    path = os.path.join(os.path.expanduser("~"), ".wslconfig")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        return None
+
+    section = None
+    mode = None
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line.strip("[]").strip().lower()
+            continue
+        if section == "wsl2" and "=" in line:
+            key, _, val = line.partition("=")
+            if key.strip().lower() == "networkingmode":
+                mode = val.strip().lower()
+    return mode
+
+
+def get_windows_ipv4_addresses() -> list[str]:
+    """ipconfig 결과에서 실제 연결된 어댑터들의 IPv4 주소를 추출."""
+    code, out, err = run_command("ipconfig")
+    if code != 0:
+        return []
+    ips = re.findall(r"IPv4[^:\n]*:\s*([\d]{1,3}(?:\.[\d]{1,3}){3})", out)
+    return ips
+
+
+def get_wsl2_interface_ips() -> list[tuple[str, str]]:
+    """`wsl ip a` 결과에서 활성 상태인 인터페이스명, IPv4 주소 목록을 추출.
+    (loopback, docker, veth 계열은 제외)"""
+    code, out, err = run_command("wsl ip a")
+    if code != 0:
+        return []
+
+    result = []
+    current_iface = None
+    is_up = False
+    for line in out.splitlines():
+        m = re.match(r"^\d+:\s+(\S+):\s+<([^>]*)>", line)
+        if m:
+            current_iface = m.group(1)
+            flags = m.group(2).split(",")
+            is_up = "UP" in flags
+            continue
+        if is_up and current_iface and not current_iface.startswith(
+            ("lo", "docker", "veth", "br-")
+        ):
+            m2 = re.search(r"inet\s+([\d]{1,3}(?:\.[\d]{1,3}){3})/\d+", line)
+            if m2:
+                result.append((current_iface, m2.group(1)))
+    return result
+
+
+def check_mirrored_status() -> tuple[bool, dict]:
+    """mirrored 네트워킹 설정 및 실제 동작 여부를 확인.
+    반환: (정상 여부, 상세정보 dict)"""
+    mode = get_wslconfig_networking_mode()
+    configured = (mode == "mirrored")
+
+    windows_ips = get_windows_ipv4_addresses()
+    wsl_ifaces = get_wsl2_interface_ips()
+    wsl_ips = [ip for _, ip in wsl_ifaces]
+
+    common_ips = sorted(set(windows_ips) & set(wsl_ips))
+    working = configured and len(common_ips) > 0
+
+    detail = {
+        "wslconfig_mode": mode or "(설정 없음)",
+        "configured": configured,
+        "windows_ips": sorted(set(windows_ips)),
+        "wsl_interfaces": wsl_ifaces,
+        "wsl_ips": sorted(set(wsl_ips)),
+        "common_ips": common_ips,
+    }
+    return working, detail
+
+
+# ------------------------------------------------------------------
 # GUI
 # ------------------------------------------------------------------
 class PortForwardApp(tk.Tk):
@@ -182,7 +291,10 @@ class PortForwardApp(tk.Tk):
         self.minsize(760, 480)
 
         self._build_widgets()
+        self.last_mirror_detail = None
+        set_command_logger(self.log_command)
         self.refresh_table()
+        self.refresh_mirror_status()
 
     # ---------------- UI 구성 ----------------
     def _build_widgets(self):
@@ -196,6 +308,20 @@ class PortForwardApp(tk.Tk):
         ttk.Separator(top, orient="vertical").pack(side="right", fill="y", padx=6)
         ttk.Button(top, text="열기", command=self.open_load_dialog).pack(side="right", padx=4)
         ttk.Button(top, text="저장", command=self.open_save_dialog).pack(side="right", padx=4)
+
+        # WSL2 mirrored 네트워킹 상태 LED
+        status_frame = ttk.Frame(self, padding=(10, 4, 10, 6))
+        status_frame.pack(fill="x")
+
+        self.mirror_canvas = tk.Canvas(status_frame, width=18, height=18, highlightthickness=0)
+        self.mirror_led = self.mirror_canvas.create_oval(2, 2, 16, 16, fill="#95a5a6", outline="")
+        self.mirror_canvas.pack(side="left", padx=(0, 6))
+
+        self.mirror_label = ttk.Label(status_frame, text="Mirrored 네트워킹: 확인 중...")
+        self.mirror_label.pack(side="left")
+
+        ttk.Button(status_frame, text="상태 새로고침", command=self.refresh_mirror_status).pack(side="left", padx=10)
+        ttk.Button(status_frame, text="상세 보기", command=self.show_mirror_detail).pack(side="left")
 
         # 테이블
         table_frame = ttk.Frame(self, padding=(10, 0, 10, 10))
@@ -223,6 +349,14 @@ class PortForwardApp(tk.Tk):
         ttk.Button(bottom, text="방화벽 규칙 추가", command=self.open_firewall_add_dialog).pack(side="right", padx=4)
         ttk.Button(bottom, text="방화벽 규칙 삭제", command=self.open_firewall_delete_dialog).pack(side="right", padx=4)
 
+        # 실행 명령어 표시 상태바 (버튼 액션마다 사용된 명령어를 표시)
+        self.command_var = tk.StringVar(value="실행된 명령어 없음")
+        command_bar = ttk.Label(
+            self, textvariable=self.command_var, relief="sunken", anchor="w",
+            padding=4, foreground="#0b5394",
+        )
+        command_bar.pack(fill="x", side="bottom")
+
         # 상태 표시줄
         self.status_var = tk.StringVar(value="준비됨")
         status_bar = ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=4)
@@ -232,6 +366,10 @@ class PortForwardApp(tk.Tk):
     def set_status(self, msg: str):
         self.status_var.set(msg)
         self.update_idletasks()
+
+    def log_command(self, cmd: str):
+        """백그라운드 스레드에서도 안전하게 호출 가능. 하단 명령어 상태바를 갱신."""
+        self.after(0, lambda: self.command_var.set(f"실행 명령어: {cmd}"))
 
     def refresh_table(self):
         """실제 시스템에 등록된 포트 포워딩 목록(netsh)을 조회해서 그리드에 표시.
@@ -283,6 +421,50 @@ class PortForwardApp(tk.Tk):
             self.set_status(f"현재 시스템에 등록된 규칙 {len(actual_rules)}건")
 
         self.run_bg(worker, on_done=done)
+
+    # ---------------- WSL2 mirrored 네트워킹 상태 ----------------
+    def set_mirror_led(self, color: str, text: str):
+        self.mirror_canvas.itemconfig(self.mirror_led, fill=color)
+        self.mirror_label.config(text=text)
+
+    def refresh_mirror_status(self):
+        self.set_mirror_led("#95a5a6", "Mirrored 네트워킹: 확인 중...")
+
+        def worker():
+            return check_mirrored_status()
+
+        def done(result):
+            working, detail = result
+            self.last_mirror_detail = detail
+            if working:
+                self.set_mirror_led("#2ecc71", "Mirrored 네트워킹: 정상 (녹색)")
+            else:
+                self.set_mirror_led("#e74c3c", "Mirrored 네트워킹: 비정상 (빨강)")
+
+        self.run_bg(worker, on_done=done)
+
+    def show_mirror_detail(self):
+        detail = self.last_mirror_detail
+        if not detail:
+            messagebox.showinfo("안내", "먼저 '상태 새로고침'을 눌러 확인해주세요.")
+            return
+
+        wsl_iface_lines = "\n  ".join(
+            f"{iface}: {ip}" for iface, ip in detail["wsl_interfaces"]
+        ) or "(없음)"
+
+        msg = (
+            f"[.wslconfig]\n"
+            f"  networkingMode = {detail['wslconfig_mode']}\n"
+            f"  mirrored 설정 여부 : {'예' if detail['configured'] else '아니오'}\n\n"
+            f"[Windows 호스트 IPv4 목록 (ipconfig)]\n"
+            f"  " + ("\n  ".join(detail["windows_ips"]) or "(없음)") + "\n\n"
+            f"[WSL2 인터페이스 (ip a)]\n"
+            f"  {wsl_iface_lines}\n\n"
+            f"[공통 IP - 미러링 동작 여부 판단]\n"
+            f"  " + ("\n  ".join(detail["common_ips"]) or "(없음, 미러링 미동작)")
+        )
+        messagebox.showinfo("Mirrored 네트워킹 상세", msg)
 
     def get_grid_rules(self) -> list[dict]:
         """현재 그리드(메인 화면)에 표시된 모든 행을 규칙 목록으로 반환."""
