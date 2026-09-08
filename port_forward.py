@@ -17,6 +17,8 @@ netsh interface portproxy / Windows 방화벽 규칙을 GUI에서 관리합니�
 """
 
 import ctypes
+import csv
+import io
 import json
 import os
 import re
@@ -278,6 +280,74 @@ def check_mirrored_status() -> tuple[bool, dict]:
 
 
 # ------------------------------------------------------------------
+# 포트 점유(LISTENING) 관리
+# ------------------------------------------------------------------
+def get_listening_ports() -> list[dict]:
+    """`netstat -ano` 결과에서 LISTENING 상태인 TCP 포트 목록을 추출.
+    반환: [{proto, address, port, pid}, ...]"""
+    code, out, err = run_command("netstat -ano -p TCP")
+    if code != 0:
+        return []
+
+    results = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line.startswith("TCP"):
+            continue
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        proto = parts[0]
+        local = parts[1]
+        state = parts[-2]
+        pid_str = parts[-1]
+        if state.upper() != "LISTENING":
+            continue
+        if ":" not in local:
+            continue
+        addr, _, port_str = local.rpartition(":")
+        try:
+            port = int(port_str)
+            pid = int(pid_str)
+        except ValueError:
+            continue
+        results.append({"proto": proto, "address": addr, "port": port, "pid": pid})
+    return results
+
+
+def get_process_name(pid: int) -> str:
+    """tasklist /FI "PID eq <pid>" 명령으로 해당 PID의 프로세스 이름을 조회."""
+    cmd = f'tasklist /FI "PID eq {pid}" /FO CSV /NH'
+    code, out, err = run_command(cmd)
+    if code != 0 or not out.strip():
+        return "(알 수 없음)"
+    try:
+        reader = csv.reader(io.StringIO(out.strip().splitlines()[0]))
+        row = next(reader)
+        return row[0] if row else "(알 수 없음)"
+    except Exception:
+        return "(알 수 없음)"
+
+
+def get_listening_ports_with_process() -> list[dict]:
+    """LISTENING 포트 목록에 PID별 프로세스 이름을 붙여서 반환."""
+    ports = get_listening_ports()
+    name_cache: dict[int, str] = {}
+    result = []
+    for p in ports:
+        pid = p["pid"]
+        if pid not in name_cache:
+            name_cache[pid] = get_process_name(pid)
+        result.append({**p, "process": name_cache[pid]})
+    return result
+
+
+def kill_process(pid: int) -> tuple[int, str, str]:
+    """taskkill /F /PID <pid> 명령으로 프로세스를 강제 종료."""
+    return run_command(f"taskkill /F /PID {pid}")
+
+
+# ------------------------------------------------------------------
 # GUI
 # ------------------------------------------------------------------
 class PortForwardApp(tk.Tk):
@@ -286,19 +356,44 @@ class PortForwardApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("Windows 포트 포워딩 관리자")
-        self.geometry("880x560")
-        self.minsize(760, 480)
+        self.title("Windows 포트 포워딩 / 점유 관리자")
+        self.geometry("920x620")
+        self.minsize(800, 520)
 
-        self._build_widgets()
+        # 하단 상태바 (두 탭 공통으로 화면 맨 아래 고정)
+        self.command_var = tk.StringVar(value="실행된 명령어 없음")
+        command_bar = ttk.Label(
+            self, textvariable=self.command_var, relief="sunken", anchor="w",
+            padding=4, foreground="#0b5394",
+        )
+        command_bar.pack(fill="x", side="bottom")
+
+        self.status_var = tk.StringVar(value="준비됨")
+        status_bar = ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=4)
+        status_bar.pack(fill="x", side="bottom")
+
+        # 탭 컨트롤
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True)
+
+        self.tab_forward = ttk.Frame(self.notebook)
+        self.tab_ports = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_forward, text="포트 포워딩 관리")
+        self.notebook.add(self.tab_ports, text="포트 점유 관리")
+
+        self._build_forward_tab(self.tab_forward)
+        self._build_port_usage_tab(self.tab_ports)
+
         self.last_mirror_detail = None
         set_command_logger(self.log_command)
+
         self.refresh_table()
         self.refresh_mirror_status()
+        self.refresh_ports()
 
-    # ---------------- UI 구성 ----------------
-    def _build_widgets(self):
-        top = ttk.Frame(self, padding=10)
+    # ---------------- 탭 1: 포트 포워딩 관리 ----------------
+    def _build_forward_tab(self, parent):
+        top = ttk.Frame(parent, padding=10)
         top.pack(fill="x")
 
         ttk.Label(top, text="포트 포워딩 규칙", font=("맑은 고딕", 13, "bold")).pack(side="left")
@@ -310,7 +405,7 @@ class PortForwardApp(tk.Tk):
         ttk.Button(top, text="저장", command=self.open_save_dialog).pack(side="right", padx=4)
 
         # WSL2 mirrored 네트워킹 상태 LED
-        status_frame = ttk.Frame(self, padding=(10, 4, 10, 6))
+        status_frame = ttk.Frame(parent, padding=(10, 4, 10, 6))
         status_frame.pack(fill="x")
 
         self.mirror_canvas = tk.Canvas(status_frame, width=18, height=18, highlightthickness=0)
@@ -324,7 +419,7 @@ class PortForwardApp(tk.Tk):
         ttk.Button(status_frame, text="상세 보기", command=self.show_mirror_detail).pack(side="left")
 
         # 테이블
-        table_frame = ttk.Frame(self, padding=(10, 0, 10, 10))
+        table_frame = ttk.Frame(parent, padding=(10, 0, 10, 10))
         table_frame.pack(fill="both", expand=True)
 
         self.tree = ttk.Treeview(table_frame, columns=self.COLUMNS, show="headings", selectmode="browse")
@@ -339,7 +434,7 @@ class PortForwardApp(tk.Tk):
         scrollbar.pack(side="right", fill="y")
 
         # 하단 버튼
-        bottom = ttk.Frame(self, padding=10)
+        bottom = ttk.Frame(parent, padding=10)
         bottom.pack(fill="x")
 
         ttk.Button(bottom, text="선택 규칙 삭제", command=self.delete_selected).pack(side="left", padx=4)
@@ -349,18 +444,38 @@ class PortForwardApp(tk.Tk):
         ttk.Button(bottom, text="방화벽 규칙 추가", command=self.open_firewall_add_dialog).pack(side="right", padx=4)
         ttk.Button(bottom, text="방화벽 규칙 삭제", command=self.open_firewall_delete_dialog).pack(side="right", padx=4)
 
-        # 실행 명령어 표시 상태바 (버튼 액션마다 사용된 명령어를 표시)
-        self.command_var = tk.StringVar(value="실행된 명령어 없음")
-        command_bar = ttk.Label(
-            self, textvariable=self.command_var, relief="sunken", anchor="w",
-            padding=4, foreground="#0b5394",
-        )
-        command_bar.pack(fill="x", side="bottom")
+    # ---------------- 탭 2: 포트 점유 관리 ----------------
+    PORT_COLUMNS = ("proto", "address", "port", "pid", "process")
+    PORT_HEADERS = ("프로토콜", "주소", "포트", "PID", "프로세스명")
 
-        # 상태 표시줄
-        self.status_var = tk.StringVar(value="준비됨")
-        status_bar = ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=4)
-        status_bar.pack(fill="x", side="bottom")
+    def _build_port_usage_tab(self, parent):
+        top = ttk.Frame(parent, padding=10)
+        top.pack(fill="x")
+
+        ttk.Label(top, text="LISTENING 포트 목록", font=("맑은 고딕", 13, "bold")).pack(side="left")
+        ttk.Button(top, text="새로고침", command=self.refresh_ports).pack(side="right", padx=4)
+
+        table_frame = ttk.Frame(parent, padding=(10, 0, 10, 10))
+        table_frame.pack(fill="both", expand=True)
+
+        self.port_tree = ttk.Treeview(
+            table_frame, columns=self.PORT_COLUMNS, show="headings", selectmode="browse"
+        )
+        for col, header in zip(self.PORT_COLUMNS, self.PORT_HEADERS):
+            self.port_tree.heading(col, text=header)
+            width = 70 if col in ("proto", "port", "pid") else 200
+            self.port_tree.column(col, width=width, anchor="center")
+        self.port_tree.pack(side="left", fill="both", expand=True)
+
+        port_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.port_tree.yview)
+        self.port_tree.configure(yscrollcommand=port_scrollbar.set)
+        port_scrollbar.pack(side="right", fill="y")
+
+        bottom = ttk.Frame(parent, padding=10)
+        bottom.pack(fill="x")
+        ttk.Button(bottom, text="선택 프로세스 종료 (taskkill /F)", command=self.kill_selected_process).pack(
+            side="left", padx=4
+        )
 
     # ---------------- 공통 ----------------
     def set_status(self, msg: str):
@@ -465,6 +580,59 @@ class PortForwardApp(tk.Tk):
             f"  " + ("\n  ".join(detail["common_ips"]) or "(없음, 미러링 미동작)")
         )
         messagebox.showinfo("Mirrored 네트워킹 상세", msg)
+
+    # ---------------- 포트 점유 관리 ----------------
+    def refresh_ports(self):
+        self.set_status("LISTENING 포트 조회 중...")
+
+        def worker():
+            return get_listening_ports_with_process()
+
+        def done(ports):
+            for item in self.port_tree.get_children():
+                self.port_tree.delete(item)
+            for p in sorted(ports, key=lambda x: x["port"]):
+                self.port_tree.insert(
+                    "", "end",
+                    values=(p["proto"], p["address"], p["port"], p["pid"], p["process"]),
+                )
+            self.set_status(f"LISTENING 포트 {len(ports)}건 조회 완료")
+
+        self.run_bg(worker, on_done=done)
+
+    def kill_selected_process(self):
+        sel = self.port_tree.selection()
+        if not sel:
+            messagebox.showinfo("안내", "종료할 프로세스를 목록에서 선택해주세요.")
+            return
+
+        vals = self.port_tree.item(sel[0], "values")
+        proto, address, port, pid, process = vals
+        pid = int(pid)
+
+        if not messagebox.askyesno(
+            "프로세스 종료 확인",
+            f"포트 {port} ({address})을(를) 사용 중인 프로세스를 종료할까요?\n\n"
+            f"PID: {pid}\n프로세스명: {process}\n\n"
+            f"taskkill /F /PID {pid} 명령이 실행됩니다."
+        ):
+            return
+
+        self.set_status(f"PID {pid} 프로세스 종료 중...")
+
+        def worker():
+            return kill_process(pid)
+
+        def done(result):
+            code, out, err = result
+            self.set_status("준비됨")
+            if code != 0:
+                messagebox.showerror("실패", f"프로세스 종료 실패:\n{err or out}")
+            else:
+                messagebox.showinfo("완료", f"PID {pid} ({process}) 프로세스를 종료했습니다.")
+            self.refresh_ports()
+
+        self.run_bg(worker, on_done=done)
 
     def get_grid_rules(self) -> list[dict]:
         """현재 그리드(메인 화면)에 표시된 모든 행을 규칙 목록으로 반환."""
