@@ -1,0 +1,48 @@
+[2026-08-26 11:20:00] 서버: dev_pem  컨테이너: blitz_admin_nginx.1.t0fsyta7t4bkoybjb80qw8qgc (7deedd835fb8)  경로: /
+  [D] bin
+  [D] boot
+  [D] dev
+  [D] docker-entrypoint.d
+  [D] etc
+  [D] home
+  [D] lib
+  [D] lib64
+  [D] media
+  [D] mnt
+  [D] opt
+  [D] proc
+  [D] root
+  [D] run
+  [D] sbin
+  [D] srv
+  [D] sys
+  [D] tmp
+  [D] usr
+  [D] var
+  [F] .dockerenv  0 B  2026-07-02 10:08:02
+  [F] docker-entrypoint.sh  1.6 KB  2026-05-23 03:24:20
+------------------------------------------------------------
+[2026-08-26 11:21:10] 서버: dev_pem  컨테이너: blitz_admin_nginx.1.t0fsyta7t4bkoybjb80qw8qgc (7deedd835fb8)  경로: /
+  [D] bin
+  [D] boot
+  [D] dev
+  [D] docker-entrypoint.d
+  [D] etc
+  [D] home
+  [D] lib
+  [D] lib64
+  [D] media
+  [D] mnt
+  [D] opt
+  [D] proc
+  [D] root
+  [D] run
+  [D] sbin
+  [D] srv
+  [D] sys
+  [D] tmp
+  [D] usr
+  [D] var
+  [F] .dockerenv  0 B  2026-07-02 10:08:02
+  [F] docker-entrypoint.sh  1.6 KB  2026-05-23 03:24:20
+------------------------------------------------------------

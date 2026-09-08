@@ -1,0 +1,143 @@
+[2026-08-14 16:01:25] Docker Build: app
+서버: dev_pem
+명령: bash -lc 'set -e
+container_id="$1"
+container_path="$2"
+service=$(basename "$container_path")
+container_parent=$(dirname "$container_path")
+work_root=$(mktemp -d /tmp/command_manager_docker_build.XXXXXX)
+trap '"'"'rm -rf "$work_root"'"'"' EXIT
+context="$work_root/$service"
+version_file="$work_root/$service.version"
+echo "container=$container_id"
+echo "container_path=$container_path"
+echo "copy_context=$context"
+docker cp "$container_id:$container_path" "$context"
+docker cp "$container_id:$container_parent/$service.version" "$version_file" >/dev/null 2>&1 || true
+if [ -f "$context/Dockerfile" ]; then
+  echo "prebuild_cleanup=scan Dockerfile symlink targets"
+  sed -n -E '"'"'s/^[[:space:]]*RUN[[:space:]]+ln[[:space:]]+-s[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:];]+).*$/\1/p'"'"' "$context/Dockerfile" |
+  while IFS= read -r link_target; do
+    case "$link_target" in
+      /app/*)
+        rel=${link_target#/app/}
+        if [ -e "$context/$rel" ] || [ -L "$context/$rel" ]; then
+          echo "remove_existing_link_target=$context/$rel"
+          rm -rf -- "$context/$rel"
+        fi
+        ;;
+    esac
+  done
+  if grep -Eq '"'"'^[[:space:]]*RUN[[:space:]]+ln[[:space:]]+-s[[:space:]]+'"'"' "$context/Dockerfile"; then
+    echo "prebuild_cleanup=patch Dockerfile ln -s targets"
+    sed -i.bak -E '"'"'s#^([[:space:]]*RUN[[:space:]]+)ln[[:space:]]+-s[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:];]+)(.*)$#\1rm -rf \3 \&\& ln -s \2 \3\4#'"'"' "$context/Dockerfile"
+  fi
+fi
+service=$(basename "$context")
+version="latest"
+if [ -e "$version_file" ]; then
+  version=$(cat "$version_file")
+  version=$(awk -v ver="$version" '"'"'BEGIN { printf "%.1f", ver + 0.1 }'"'"')
+  echo "$version" > "$version_file"
+  docker cp "$version_file" "$container_id:$container_parent/$service.version" >/dev/null 2>&1 || true
+  version="v$version"
+fi
+echo "service=$service"
+echo "version=$version"
+echo "context=$context"
+echo "container_version_file=$container_parent/$service.version"
+docker build --progress=plain --tag "$service:$version" "$context"' -- 21745e088fc1 /app
+--------------------------------------------------------------------------------
+container=21745e088fc1
+container_path=/app
+copy_context=/tmp/command_manager_docker_build.DDkqnP/app
+Successfully copied 165MB to /tmp/command_manager_docker_build.DDkqnP/app
+prebuild_cleanup=scan Dockerfile symlink targets
+remove_existing_link_target=/tmp/command_manager_docker_build.DDkqnP/app/src/config
+remove_existing_link_target=/tmp/command_manager_docker_build.DDkqnP/app/uploads
+prebuild_cleanup=patch Dockerfile ln -s targets
+service=app
+version=latest
+context=/tmp/command_manager_docker_build.DDkqnP/app
+container_version_file=//app.version
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 528B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/node:18.16.0
+#2 DONE 1.0s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [ 1/14] FROM docker.io/library/node:18.16.0@sha256:4a55308cc855cba1a925d19ae4e45838741dad2fd7bb8949a93b2a0f2ae339e3
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 2.51MB 0.3s done
+#5 DONE 0.3s
+
+#6 [ 2/14] RUN apt-get update
+#6 CACHED
+
+#7 [ 4/14] RUN npm install pm2 -g
+#7 CACHED
+
+#8 [ 5/14] RUN npm install @pm2/pm2-version-check -g
+#8 CACHED
+
+#9 [ 3/14] RUN npm install pnpm@8 -g
+#9 CACHED
+
+#10 [ 6/14] RUN pm2 install typescript
+#10 CACHED
+
+#11 [ 7/14] RUN pm2 install pm2-logrotate
+#11 CACHED
+
+#12 [ 8/14] RUN pm2 set pm2-logrotate
+#12 CACHED
+
+#13 [ 9/14] COPY ./ /app/
+#13 DONE 0.7s
+
+#14 [10/14] WORKDIR /app
+#14 DONE 0.0s
+
+#15 [11/14] RUN mkdir -p /volume
+#15 DONE 0.1s
+
+#16 [12/14] RUN rm -rf /app/src/config && ln -s /volume/config /app/src/config
+#16 DONE 0.2s
+
+#17 [13/14] RUN rm -rf /app/uploads && ln -s /volume/uploads /app/uploads
+#17 DONE 0.2s
+
+#18 [14/14] RUN pnpm install
+#18 0.366 [?25l[36m?[39m [1mThe modules directory at "/app/node_modules" will be removed and reinstalled from scratch. Proceed?[22m [2m(Y/n)[22m [2m‣[22m [36mtrue[39m[4D
+#18 0.522    ╭───────────────────────────────────────────────────────────────────╮
+#18 0.522    │                                                                   │
+#18 0.522    │                Update available! 8.15.9 → 11.21.0.                │
+#18 0.522    │   Changelog: https://github.com/pnpm/pnpm/releases/tag/v11.21.0   │
+#18 0.522    │                 Run "pnpm add -g pnpm" to update.                 │
+#18 0.522    │                                                                   │
+#18 0.522    │      Follow @pnpmjs for updates: https://twitter.com/pnpmjs       │
+#18 0.522    │                                                                   │
+#18 0.522    ╰───────────────────────────────────────────────────────────────────╯
+#18 0.522 
+#18 0.537 [?25h
+#18 DONE 0.5s
+
+#19 exporting to image
+#19 exporting layers
+#19 exporting layers 0.7s done
+#19 writing image sha256:104c1117f0d0dd7ff87d2fbb575adcf8723c2db49e47e1f1199a9524907cc16c done
+#19 naming to docker.io/library/app:latest done
+#19 DONE 0.7s
+
+
+[명령 종료: 코드 0]
+--------------------------------------------------------------------------------

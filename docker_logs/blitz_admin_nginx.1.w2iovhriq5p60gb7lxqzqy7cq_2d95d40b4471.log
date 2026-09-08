@@ -1,0 +1,24 @@
+[2026-08-25 16:35:58] 서버: oper_pem  컨테이너: blitz_admin_nginx.1.w2iovhriq5p60gb7lxqzqy7cq (2d95d40b4471)  경로: /
+  [D] bin
+  [D] boot
+  [D] dev
+  [D] docker-entrypoint.d
+  [D] etc
+  [D] home
+  [D] lib
+  [D] lib64
+  [D] media
+  [D] mnt
+  [D] opt
+  [D] proc
+  [D] root
+  [D] run
+  [D] sbin
+  [D] srv
+  [D] sys
+  [D] tmp
+  [D] usr
+  [D] var
+  [F] .dockerenv  0 B  2024-07-10 10:14:48
+  [F] docker-entrypoint.sh  1.6 KB  2024-04-10 11:53:46
+------------------------------------------------------------

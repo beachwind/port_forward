@@ -1,0 +1,119 @@
+[2026-08-26 09:33:28] 서버: oper_pem  컨테이너: blitz_admin_nginx.1.pro85i2cuxfcfbj2u8nis8qy2 (479c6301be8e)  경로: /
+  [D] bin
+  [D] boot
+  [D] dev
+  [D] docker-entrypoint.d
+  [D] etc
+  [D] home
+  [D] lib
+  [D] lib64
+  [D] media
+  [D] mnt
+  [D] opt
+  [D] proc
+  [D] root
+  [D] run
+  [D] sbin
+  [D] srv
+  [D] sys
+  [D] tmp
+  [D] usr
+  [D] var
+  [F] .dockerenv  0 B  2026-08-25 17:13:52
+  [F] docker-entrypoint.sh  1.6 KB  2026-08-25 09:22:05
+------------------------------------------------------------
+[2026-08-26 09:33:32] 서버: oper_pem  컨테이너: blitz_admin_nginx.1.pro85i2cuxfcfbj2u8nis8qy2 (479c6301be8e)  경로: /usr
+  [D] bin
+  [D] games
+  [D] include
+  [D] lib
+  [D] lib64
+  [D] libexec
+  [D] local
+  [D] sbin
+  [D] share
+  [D] src
+------------------------------------------------------------
+[2026-08-26 09:33:36] 서버: oper_pem  컨테이너: blitz_admin_nginx.1.pro85i2cuxfcfbj2u8nis8qy2 (479c6301be8e)  경로: /usr/share
+  [D] apt
+  [D] base-files
+  [D] base-passwd
+  [D] bash-completion
+  [D] bug
+  [D] ca-certificates
+  [D] common-licenses
+  [D] debconf
+  [D] debianutils
+  [D] dict
+  [D] doc
+  [D] doc-base
+  [D] dpkg
+  [D] fish
+  [D] fontconfig
+  [D] fonts
+  [D] gcc
+  [D] gdb
+  [D] info
+  [D] java
+  [D] keyrings
+  [D] libc-bin
+  [D] libgcrypt20
+  [D] lintian
+  [D] locale
+  [D] man
+  [D] maven-repo
+  [D] menu
+  [D] misc
+  [D] nginx
+  [D] pam
+  [D] pam-configs
+  [D] perl5
+  [D] pixmaps
+  [D] polkit-1
+  [D] tabset
+  [D] terminfo
+  [D] util-linux
+  [D] X11
+  [D] xml
+  [D] zoneinfo
+  [D] zsh
+------------------------------------------------------------
+[2026-08-26 09:33:44] 서버: oper_pem  컨테이너: blitz_admin_nginx.1.pro85i2cuxfcfbj2u8nis8qy2 (479c6301be8e)  경로: /usr/share/nginx
+  [D] html
+------------------------------------------------------------
+[2026-08-26 09:33:47] 서버: oper_pem  컨테이너: blitz_admin_nginx.1.pro85i2cuxfcfbj2u8nis8qy2 (479c6301be8e)  경로: /usr/share/nginx/html
+  [D] css
+  [D] fonts
+  [D] img
+  [D] js
+  [F] favicon.ico  1.1 KB  2026-08-26 09:22:14
+  [F] index.html  1.7 KB  2026-08-26 09:22:14
+  [F] manifest.json  565 B  2026-08-26 09:22:14
+  [F] precache-manifest.23a363ef82f6cdf813aa8ed353e8c871.js  2.1 KB  2026-08-26 09:22:14
+  [F] robots.txt  24 B  2026-08-26 09:22:14
+  [F] service-worker.js  963 B  2026-08-26 09:22:14
+------------------------------------------------------------
+[2026-08-26 11:07:03] 서버: oper_pem  컨테이너: blitz_admin_nginx.1.pro85i2cuxfcfbj2u8nis8qy2 (479c6301be8e)  경로: /
+  [D] bin
+  [D] boot
+  [D] dev
+  [D] docker-entrypoint.d
+  [D] etc
+  [D] home
+  [D] lib
+  [D] lib64
+  [D] media
+  [D] mnt
+  [D] opt
+  [D] proc
+  [D] root
+  [D] run
+  [D] sbin
+  [D] srv
+  [D] sys
+  [D] tmp
+  [D] usr
+  [D] var
+  [F] .dockerenv  0 B  2026-08-25 17:13:52
+  [F] docker-entrypoint.sh  1.6 KB  2026-08-25 09:22:05
+------------------------------------------------------------

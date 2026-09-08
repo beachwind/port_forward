@@ -1,0 +1,125 @@
+[2026-08-14 15:58:51] Docker Build: app
+서버: dev_pem
+명령: bash -lc 'set -e
+container_id="$1"
+container_path="$2"
+service=$(basename "$container_path")
+container_parent=$(dirname "$container_path")
+work_root=$(mktemp -d /tmp/command_manager_docker_build.XXXXXX)
+trap '"'"'rm -rf "$work_root"'"'"' EXIT
+context="$work_root/$service"
+version_file="$work_root/$service.version"
+echo "container=$container_id"
+echo "container_path=$container_path"
+echo "copy_context=$context"
+docker cp "$container_id:$container_path" "$context"
+docker cp "$container_id:$container_parent/$service.version" "$version_file" >/dev/null 2>&1 || true
+if [ -f "$context/Dockerfile" ]; then
+  echo "prebuild_cleanup=scan Dockerfile symlink targets"
+  sed -n -E '"'"'s/^[[:space:]]*RUN[[:space:]]+ln[[:space:]]+-s[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:];]+).*$//p'"'"' "$context/Dockerfile" |
+  while IFS= read -r link_target; do
+    case "$link_target" in
+      /app/*)
+        rel=${link_target#/app/}
+        if [ -e "$context/$rel" ] || [ -L "$context/$rel" ]; then
+          echo "remove_existing_link_target=$context/$rel"
+          rm -rf -- "$context/$rel"
+        fi
+        ;;
+    esac
+  done
+fi
+service=$(basename "$context")
+version="latest"
+if [ -e "$version_file" ]; then
+  version=$(cat "$version_file")
+  version=$(awk -v ver="$version" '"'"'BEGIN { printf "%.1f", ver + 0.1 }'"'"')
+  echo "$version" > "$version_file"
+  docker cp "$version_file" "$container_id:$container_parent/$service.version" >/dev/null 2>&1 || true
+  version="v$version"
+fi
+echo "service=$service"
+echo "version=$version"
+echo "context=$context"
+echo "container_version_file=$container_parent/$service.version"
+docker build --progress=plain --tag "$service:$version" "$context"' -- 21745e088fc1 /app
+--------------------------------------------------------------------------------
+container=21745e088fc1
+container_path=/app
+copy_context=/tmp/command_manager_docker_build.Z9rzPp/app
+Successfully copied 165MB to /tmp/command_manager_docker_build.Z9rzPp/app
+prebuild_cleanup=scan Dockerfile symlink targets
+service=app
+version=latest
+context=/tmp/command_manager_docker_build.Z9rzPp/app
+container_version_file=//app.version
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 479B done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/node:18.16.0
+#2 DONE 0.7s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [ 1/14] FROM docker.io/library/node:18.16.0@sha256:4a55308cc855cba1a925d19ae4e45838741dad2fd7bb8949a93b2a0f2ae339e3
+#4 DONE 0.0s
+
+#5 [internal] load build context
+#5 transferring context: 2.51MB 0.3s done
+#5 DONE 0.3s
+
+#6 [ 8/14] RUN pm2 set pm2-logrotate
+#6 CACHED
+
+#7 [10/14] WORKDIR /app
+#7 CACHED
+
+#8 [ 2/14] RUN apt-get update
+#8 CACHED
+
+#9 [ 6/14] RUN pm2 install typescript
+#9 CACHED
+
+#10 [ 9/14] COPY ./ /app/
+#10 CACHED
+
+#11 [ 5/14] RUN npm install @pm2/pm2-version-check -g
+#11 CACHED
+
+#12 [ 3/14] RUN npm install pnpm@8 -g
+#12 CACHED
+
+#13 [ 4/14] RUN npm install pm2 -g
+#13 CACHED
+
+#14 [ 7/14] RUN pm2 install pm2-logrotate
+#14 CACHED
+
+#15 [11/14] RUN mkdir -p /volume
+#15 CACHED
+
+#16 [12/14] RUN ln -s /volume/config /app/src/config
+#16 0.098 ln: failed to create symbolic link '/app/src/config': File exists
+#16 ERROR: process "/bin/sh -c ln -s /volume/config /app/src/config" did not complete successfully: exit code: 1
+------
+ > [12/14] RUN ln -s /volume/config /app/src/config:
+0.098 ln: failed to create symbolic link '/app/src/config': File exists
+------
+Dockerfile:21
+--------------------
+  19 |     RUN mkdir -p /volume
+  20 |     
+  21 | >>> RUN ln -s /volume/config /app/src/config
+  22 |     RUN ln -s /volume/uploads /app/uploads
+  23 |     
+--------------------
+ERROR: failed to build: failed to solve: process "/bin/sh -c ln -s /volume/config /app/src/config" did not complete successfully: exit code: 1
+
+
+[명령 종료: 코드 1]
+--------------------------------------------------------------------------------

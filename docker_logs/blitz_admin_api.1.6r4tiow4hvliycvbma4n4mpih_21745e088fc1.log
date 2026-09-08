@@ -1,0 +1,477 @@
+[2026-08-14 13:21:19] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /
+  [D] app
+  [D] bin
+  [D] boot
+  [D] dev
+  [D] etc
+  [D] home
+  [D] lib
+  [D] lib32
+  [D] lib64
+  [D] libx32
+  [D] media
+  [D] mnt
+  [D] opt
+  [D] proc
+  [D] root
+  [D] run
+  [D] sbin
+  [D] srv
+  [D] sys
+  [D] tmp
+  [D] usr
+  [D] var
+  [D] volume
+  [F] .dockerenv  0 B  2026-07-02 10:08:02
+------------------------------------------------------------
+[2026-08-14 13:37:49] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 13:38:15] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app/src
+  [D] comm
+  [D] config
+  [D] db
+  [D] debug
+  [D] ftp
+  [D] ocpp
+  [D] pg
+  [D] schedule
+  [D] socket
+  [D] user-api
+  [D] util
+  [D] web
+  [F] app.ts  1005 B  2024-06-19 09:29:30
+  [F] event.ts  75 B  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 13:38:21] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app/src/db
+  [F] area.ts  18.1 KB  2024-07-03 11:47:14
+  [F] board.ts  3.5 KB  2023-10-25 14:46:44
+  [F] chargepoint-model.ts  8.3 KB  2024-07-03 11:47:14
+  [F] chargepoint.ts  35.6 KB  2024-07-03 11:47:14
+  [F] comment.ts  13.5 KB  2024-07-03 11:47:14
+  [F] diagnostics-log.ts  4.8 KB  2024-07-03 11:47:14
+  [F] fault-case.ts  830 B  2024-07-09 13:31:00
+  [F] fault-log.ts  4.2 KB  2024-07-09 13:31:00
+  [F] file.ts  5.6 KB  2024-06-12 11:24:05
+  [F] firmware-log.ts  3.5 KB  2024-06-19 11:42:15
+  [F] firmware.ts  13.2 KB  2024-07-03 11:47:14
+  [F] garage-monitoring.ts  2.0 KB  2024-05-10 09:47:42
+  [F] helper.ts  5.6 KB  2024-07-03 11:47:14
+  [F] idtag.ts  4.0 KB  2024-06-17 16:42:44
+  [F] index.ts  4.4 KB  2023-12-14 12:17:03
+  [F] log.ts  1.4 KB  2023-10-25 14:46:44
+  [F] meter-period-log.ts  1.1 KB  2024-04-01 12:05:43
+  [F] msglog.ts  2.0 KB  2024-07-03 11:47:14
+  [F] notification.ts  3.3 KB  2024-07-03 11:47:14
+  [F] payment.ts  13.8 KB  2024-07-03 11:47:14
+  [F] pglog.ts  4.4 KB  2024-02-06 15:55:42
+  [F] point.ts  7.3 KB  2024-07-03 11:47:14
+  [F] post.ts  15.2 KB  2024-07-03 11:47:14
+  [F] price-table.ts  8.0 KB  2024-07-03 11:47:14
+  [F] staff.ts  10.8 KB  2024-07-03 11:47:14
+  [F] system-config.ts  5.5 KB  2023-12-20 11:06:48
+  [F] transaction.ts  12.7 KB  2026-06-02 16:41:02
+  [F] user-card.ts  3.4 KB  2024-02-29 15:56:35
+  [F] user.ts  16.0 KB  2024-07-03 11:47:14
+------------------------------------------------------------
+[2026-08-14 13:48:28] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 13:48:32] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app/src
+  [D] comm
+  [D] config
+  [D] db
+  [D] debug
+  [D] ftp
+  [D] ocpp
+  [D] pg
+  [D] schedule
+  [D] socket
+  [D] user-api
+  [D] util
+  [D] web
+  [F] app.ts  1005 B  2024-06-19 09:29:30
+  [F] event.ts  75 B  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 13:48:35] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app/src/db
+  [F] area.ts  18.1 KB  2024-07-03 11:47:14
+  [F] board.ts  3.5 KB  2023-10-25 14:46:44
+  [F] chargepoint-model.ts  8.3 KB  2024-07-03 11:47:14
+  [F] chargepoint.ts  35.6 KB  2024-07-03 11:47:14
+  [F] comment.ts  13.5 KB  2024-07-03 11:47:14
+  [F] diagnostics-log.ts  4.8 KB  2024-07-03 11:47:14
+  [F] fault-case.ts  830 B  2024-07-09 13:31:00
+  [F] fault-log.ts  4.2 KB  2024-07-09 13:31:00
+  [F] file.ts  5.6 KB  2024-06-12 11:24:05
+  [F] firmware-log.ts  3.5 KB  2024-06-19 11:42:15
+  [F] firmware.ts  13.2 KB  2024-07-03 11:47:14
+  [F] garage-monitoring.ts  2.0 KB  2024-05-10 09:47:42
+  [F] helper.ts  5.6 KB  2024-07-03 11:47:14
+  [F] idtag.ts  4.0 KB  2024-06-17 16:42:44
+  [F] index.ts  4.4 KB  2023-12-14 12:17:03
+  [F] log.ts  1.4 KB  2023-10-25 14:46:44
+  [F] meter-period-log.ts  1.1 KB  2024-04-01 12:05:43
+  [F] msglog.ts  2.0 KB  2024-07-03 11:47:14
+  [F] notification.ts  3.3 KB  2024-07-03 11:47:14
+  [F] payment.ts  13.8 KB  2024-07-03 11:47:14
+  [F] pglog.ts  4.4 KB  2024-02-06 15:55:42
+  [F] point.ts  7.3 KB  2024-07-03 11:47:14
+  [F] post.ts  15.2 KB  2024-07-03 11:47:14
+  [F] price-table.ts  8.0 KB  2024-07-03 11:47:14
+  [F] staff.ts  10.8 KB  2024-07-03 11:47:14
+  [F] system-config.ts  5.5 KB  2023-12-20 11:06:48
+  [F] transaction.ts  12.7 KB  2026-06-02 16:41:02
+  [F] user-card.ts  3.4 KB  2024-02-29 15:56:35
+  [F] user.ts  16.0 KB  2024-07-03 11:47:14
+------------------------------------------------------------
+[2026-08-14 13:48:57] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app/src/db
+  [F] area.ts  18.1 KB  2024-07-03 11:47:14
+  [F] board.ts  3.5 KB  2023-10-25 14:46:44
+  [F] chargepoint-model.ts  8.3 KB  2024-07-03 11:47:14
+  [F] chargepoint.ts  35.6 KB  2024-07-03 11:47:14
+  [F] comment.ts  13.5 KB  2024-07-03 11:47:14
+  [F] diagnostics-log.ts  4.8 KB  2024-07-03 11:47:14
+  [F] fault-case.ts  830 B  2024-07-09 13:31:00
+  [F] fault-log.ts  4.2 KB  2024-07-09 13:31:00
+  [F] file.ts  5.6 KB  2024-06-12 11:24:05
+  [F] firmware-log.ts  3.5 KB  2024-06-19 11:42:15
+  [F] firmware.ts  13.2 KB  2024-07-03 11:47:14
+  [F] garage-monitoring.ts  2.0 KB  2024-05-10 09:47:42
+  [F] helper.ts  5.6 KB  2024-07-03 11:47:14
+  [F] idtag.ts  4.0 KB  2024-06-17 16:42:44
+  [F] index.ts  4.4 KB  2023-12-14 12:17:03
+  [F] log.ts  1.4 KB  2023-10-25 14:46:44
+  [F] meter-period-log.ts  1.1 KB  2024-04-01 12:05:43
+  [F] msglog.ts  2.0 KB  2024-07-03 11:47:14
+  [F] notification.ts  3.3 KB  2024-07-03 11:47:14
+  [F] payment.ts  13.8 KB  2024-07-03 11:47:14
+  [F] pglog.ts  4.4 KB  2024-02-06 15:55:42
+  [F] point.ts  7.3 KB  2024-07-03 11:47:14
+  [F] post.ts  15.2 KB  2024-07-03 11:47:14
+  [F] price-table.ts  8.0 KB  2024-07-03 11:47:14
+  [F] staff.ts  10.8 KB  2024-07-03 11:47:14
+  [F] system-config.ts  5.5 KB  2023-12-20 11:06:48
+  [F] user-card.ts  3.4 KB  2024-02-29 15:56:35
+  [F] user.ts  16.0 KB  2024-07-03 11:47:14
+------------------------------------------------------------
+[2026-08-14 13:49:53] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app/src/db
+  [F] area.ts  18.1 KB  2024-07-03 11:47:14
+  [F] board.ts  3.5 KB  2023-10-25 14:46:44
+  [F] chargepoint-model.ts  8.3 KB  2024-07-03 11:47:14
+  [F] chargepoint.ts  35.6 KB  2024-07-03 11:47:14
+  [F] comment.ts  13.5 KB  2024-07-03 11:47:14
+  [F] diagnostics-log.ts  4.8 KB  2024-07-03 11:47:14
+  [F] fault-case.ts  830 B  2024-07-09 13:31:00
+  [F] fault-log.ts  4.2 KB  2024-07-09 13:31:00
+  [F] file.ts  5.6 KB  2024-06-12 11:24:05
+  [F] firmware-log.ts  3.5 KB  2024-06-19 11:42:15
+  [F] firmware.ts  13.2 KB  2024-07-03 11:47:14
+  [F] garage-monitoring.ts  2.0 KB  2024-05-10 09:47:42
+  [F] helper.ts  5.6 KB  2024-07-03 11:47:14
+  [F] idtag.ts  4.0 KB  2024-06-17 16:42:44
+  [F] index.ts  4.4 KB  2023-12-14 12:17:03
+  [F] log.ts  1.4 KB  2023-10-25 14:46:44
+  [F] meter-period-log.ts  1.1 KB  2024-04-01 12:05:43
+  [F] msglog.ts  2.0 KB  2024-07-03 11:47:14
+  [F] notification.ts  3.3 KB  2024-07-03 11:47:14
+  [F] payment.ts  13.8 KB  2024-07-03 11:47:14
+  [F] pglog.ts  4.4 KB  2024-02-06 15:55:42
+  [F] point.ts  7.3 KB  2024-07-03 11:47:14
+  [F] post.ts  15.2 KB  2024-07-03 11:47:14
+  [F] price-table.ts  8.0 KB  2024-07-03 11:47:14
+  [F] staff.ts  10.8 KB  2024-07-03 11:47:14
+  [F] system-config.ts  5.5 KB  2023-12-20 11:06:48
+  [F] user-card.ts  3.4 KB  2024-02-29 15:56:35
+  [F] user.ts  16.0 KB  2024-07-03 11:47:14
+------------------------------------------------------------
+[2026-08-14 15:38:30] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 15:38:43] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app/src
+  [D] comm
+  [D] config
+  [D] db
+  [D] debug
+  [D] ftp
+  [D] ocpp
+  [D] pg
+  [D] schedule
+  [D] socket
+  [D] user-api
+  [D] util
+  [D] web
+  [F] app.ts  1005 B  2024-06-19 09:29:30
+  [F] event.ts  75 B  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 15:38:48] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app/src/db
+  [F] area.ts  18.1 KB  2024-07-03 11:47:14
+  [F] board.ts  3.5 KB  2023-10-25 14:46:44
+  [F] chargepoint-model.ts  8.3 KB  2024-07-03 11:47:14
+  [F] chargepoint.ts  35.6 KB  2024-07-03 11:47:14
+  [F] comment.ts  13.5 KB  2024-07-03 11:47:14
+  [F] diagnostics-log.ts  4.8 KB  2024-07-03 11:47:14
+  [F] fault-case.ts  830 B  2024-07-09 13:31:00
+  [F] fault-log.ts  4.2 KB  2024-07-09 13:31:00
+  [F] file.ts  5.6 KB  2024-06-12 11:24:05
+  [F] firmware-log.ts  3.5 KB  2024-06-19 11:42:15
+  [F] firmware.ts  13.2 KB  2024-07-03 11:47:14
+  [F] garage-monitoring.ts  2.0 KB  2024-05-10 09:47:42
+  [F] helper.ts  5.6 KB  2024-07-03 11:47:14
+  [F] idtag.ts  4.0 KB  2024-06-17 16:42:44
+  [F] index.ts  4.4 KB  2023-12-14 12:17:03
+  [F] log.ts  1.4 KB  2023-10-25 14:46:44
+  [F] meter-period-log.ts  1.1 KB  2024-04-01 12:05:43
+  [F] msglog.ts  2.0 KB  2024-07-03 11:47:14
+  [F] notification.ts  3.3 KB  2024-07-03 11:47:14
+  [F] payment.ts  13.8 KB  2024-07-03 11:47:14
+  [F] pglog.ts  4.4 KB  2024-02-06 15:55:42
+  [F] point.ts  7.3 KB  2024-07-03 11:47:14
+  [F] post.ts  15.2 KB  2024-07-03 11:47:14
+  [F] price-table.ts  8.0 KB  2024-07-03 11:47:14
+  [F] staff.ts  10.8 KB  2024-07-03 11:47:14
+  [F] system-config.ts  5.5 KB  2023-12-20 11:06:48
+  [F] user-card.ts  3.4 KB  2024-02-29 15:56:35
+  [F] user.ts  16.0 KB  2024-07-03 11:47:14
+------------------------------------------------------------
+[2026-08-14 15:39:13] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app/src/db
+  [F] area.ts  18.1 KB  2024-07-03 11:47:14
+  [F] board.ts  3.5 KB  2023-10-25 14:46:44
+  [F] chargepoint-model.ts  8.3 KB  2024-07-03 11:47:14
+  [F] chargepoint.ts  35.6 KB  2024-07-03 11:47:14
+  [F] comment.ts  13.5 KB  2024-07-03 11:47:14
+  [F] diagnostics-log.ts  4.8 KB  2024-07-03 11:47:14
+  [F] fault-case.ts  830 B  2024-07-09 13:31:00
+  [F] fault-log.ts  4.2 KB  2024-07-09 13:31:00
+  [F] file.ts  5.6 KB  2024-06-12 11:24:05
+  [F] firmware-log.ts  3.5 KB  2024-06-19 11:42:15
+  [F] firmware.ts  13.2 KB  2024-07-03 11:47:14
+  [F] garage-monitoring.ts  2.0 KB  2024-05-10 09:47:42
+  [F] helper.ts  5.6 KB  2024-07-03 11:47:14
+  [F] idtag.ts  4.0 KB  2024-06-17 16:42:44
+  [F] index.ts  4.4 KB  2023-12-14 12:17:03
+  [F] log.ts  1.4 KB  2023-10-25 14:46:44
+  [F] meter-period-log.ts  1.1 KB  2024-04-01 12:05:43
+  [F] msglog.ts  2.0 KB  2024-07-03 11:47:14
+  [F] notification.ts  3.3 KB  2024-07-03 11:47:14
+  [F] payment.ts  13.8 KB  2024-07-03 11:47:14
+  [F] pglog.ts  4.4 KB  2024-02-06 15:55:42
+  [F] point.ts  7.3 KB  2024-07-03 11:47:14
+  [F] post.ts  15.2 KB  2024-07-03 11:47:14
+  [F] price-table.ts  8.0 KB  2024-07-03 11:47:14
+  [F] staff.ts  10.8 KB  2024-07-03 11:47:14
+  [F] system-config.ts  5.5 KB  2023-12-20 11:06:48
+  [F] transaction.ts  17.4 KB  2026-08-14 15:39:12
+  [F] user-card.ts  3.4 KB  2024-02-29 15:56:35
+  [F] user.ts  16.0 KB  2024-07-03 11:47:14
+------------------------------------------------------------
+[2026-08-14 15:48:34] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 15:54:45] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 15:55:14] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 15:58:41] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 15:58:54] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 16:01:19] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 16:01:30] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
+[2026-08-14 16:11:26] 서버: dev_pem  컨테이너: blitz_admin_api.1.6r4tiow4hvliycvbma4n4mpih (21745e088fc1)  경로: /app
+  [D] .git
+  [D] assets
+  [D] bin
+  [D] logs
+  [D] node_modules
+  [D] src
+  [D] uploads
+  [F] .eslintignore  21 B  2023-10-25 14:46:44
+  [F] .eslintrc.json  627 B  2026-06-02 11:53:46
+  [F] .gitignore  186 B  2024-05-29 18:01:44
+  [F] .gitlab-ci.yml  1.0 KB  2024-07-10 16:52:34
+  [F] build.sh  631 B  2023-10-25 14:46:44
+  [F] Dockerfile  440 B  2026-06-02 16:00:06
+  [F] package.json  1.9 KB  2026-06-02 11:48:26
+  [F] pnpm-lock.yaml  153.5 KB  2026-06-02 11:48:26
+  [F] README.md  412 B  2024-10-16 11:34:14
+  [F] run.sh  428 B  2024-02-29 15:56:35
+  [F] tsconfig.json  12.0 KB  2023-10-25 14:46:44
+------------------------------------------------------------
