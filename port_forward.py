@@ -476,6 +476,123 @@ def kill_wsl_process(pid: int) -> tuple[int, str, str]:
 
 
 # ------------------------------------------------------------------
+# Windows 방화벽 규칙 조회
+# ------------------------------------------------------------------
+def get_windows_firewall_rules() -> list[dict]:
+    """PowerShell로 Windows 방화벽 규칙 전체 목록을 조회.
+    각 규칙에 연결된 포트 필터(프로토콜/포트)까지 함께 매핑해서 반환한다.
+    반환: [{DisplayName, Enabled, Direction, Action, Protocol, LocalPort, RemotePort, Profile}, ...]"""
+    ps_cmd = (
+        "$rules = Get-NetFirewallRule; "
+        "$ports = Get-NetFirewallPortFilter; "
+        "$portMap = @{}; "
+        "foreach ($p in $ports) { $portMap[$p.InstanceID] = $p }; "
+        "$rules | ForEach-Object { "
+        "$pf = $portMap[$_.InstanceID]; "
+        "[PSCustomObject]@{ "
+        "DisplayName = $_.DisplayName; "
+        "Enabled = $_.Enabled; "
+        "Direction = $_.Direction; "
+        "Action = $_.Action; "
+        "Protocol = $(if ($pf) { $pf.Protocol } else { '' }); "
+        "LocalPort = $(if ($pf) { $pf.LocalPort } else { '' }); "
+        "RemotePort = $(if ($pf) { $pf.RemotePort } else { '' }); "
+        "Profile = $_.Profile "
+        "} "
+        "} | ConvertTo-Csv -NoTypeInformation"
+    )
+    code, out, err = run_powershell(ps_cmd)
+    if code != 0 or not out.strip():
+        return []
+
+    rows = []
+    reader = csv.reader(io.StringIO(out))
+    header = next(reader, None)
+    if not header:
+        return rows
+    for row in reader:
+        if len(row) < len(header):
+            continue
+        rows.append(dict(zip(header, row)))
+    return rows
+
+
+# ------------------------------------------------------------------
+# WSL 내부 방화벽(ufw / iptables) 현황 조회
+# ------------------------------------------------------------------
+def _parse_ufw_status(out: str) -> list[dict]:
+    """`ufw status numbered` 출력을 파싱.
+    반환: [{chain, no, action, to, from, note}, ...]"""
+    rows = []
+    for line in out.splitlines():
+        line = line.rstrip()
+        m = re.match(r"^\[\s*(\d+)\]\s+(.*)$", line)
+        if not m:
+            continue
+        no = m.group(1)
+        rest = m.group(2)
+        fields = re.split(r"\s{2,}", rest.strip())
+        to = fields[0] if len(fields) > 0 else ""
+        action = fields[1] if len(fields) > 1 else ""
+        frm = fields[2] if len(fields) > 2 else ""
+        rows.append({"chain": "", "no": no, "action": action, "to": to, "from": frm, "note": ""})
+    return rows
+
+
+def _parse_iptables_status(out: str) -> list[dict]:
+    """`iptables -L -n --line-numbers` 출력을 파싱.
+    반환: [{chain, no, action, to, from, note}, ...]"""
+    rows = []
+    current_chain = None
+    for line in out.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        m_chain = re.match(r"^Chain (\S+) \(policy (\S+)\)", stripped)
+        if m_chain:
+            current_chain = m_chain.group(1)
+            continue
+        if stripped.startswith(("num", "target")):
+            continue
+        parts = stripped.split(None, 6)
+        if len(parts) < 6 or not parts[0].isdigit():
+            continue
+        no, target, prot, opt, source, destination = parts[:6]
+        extra = parts[6] if len(parts) > 6 else ""
+        rows.append({
+            "chain": current_chain or "",
+            "no": no,
+            "action": target,
+            "to": destination,
+            "from": source,
+            "note": f"{prot} {extra}".strip(),
+        })
+    return rows
+
+
+def get_wsl_firewall_status() -> tuple[str, list[dict]]:
+    """WSL 내부 방화벽 상태를 조회. ufw가 있으면 ufw를, 없으면 iptables를 확인한다.
+    반환: (상태 설명 문자열, 규칙 목록)"""
+    code, out, err = run_command('wsl bash -c "ufw status numbered 2>/dev/null"')
+    m_status = re.search(r"^Status:\s+(\S+)", out, re.MULTILINE) if code == 0 else None
+    if m_status:
+        active = m_status.group(1).lower() == "active"
+        mode = "ufw (활성)" if active else "ufw (비활성)"
+        return (mode, _parse_ufw_status(out))
+
+    # ufw가 없거나 비활성 판단이 안 되면 iptables로 시도
+    # (일반 사용자는 권한이 없으므로 passwordless sudo -> 실패 시 무권한 시도 순으로 확인)
+    code2, out2, err2 = run_command(
+        'wsl bash -c "sudo -n iptables -L -n --line-numbers 2>/dev/null '
+        '|| iptables -L -n --line-numbers 2>/dev/null"'
+    )
+    if code2 == 0 and "Chain" in out2:
+        return ("iptables", _parse_iptables_status(out2))
+
+    return ("확인 불가 (ufw/iptables 미설치 또는 권한 부족)", [])
+
+
+# ------------------------------------------------------------------
 # GUI
 # ------------------------------------------------------------------
 class PortForwardApp(tk.Tk):
@@ -516,21 +633,30 @@ class PortForwardApp(tk.Tk):
         self.tab_forward = ttk.Frame(self.notebook)
         self.tab_ports = ttk.Frame(self.notebook)
         self.tab_wsl_ports = ttk.Frame(self.notebook)
+        self.tab_win_fw = ttk.Frame(self.notebook)
+        self.tab_wsl_fw = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_forward, text="포트 포워딩 관리")
         self.notebook.add(self.tab_ports, text="포트 점유 관리")
         self.notebook.add(self.tab_wsl_ports, text="WSL 포트 점유 현황")
+        self.notebook.add(self.tab_win_fw, text="Windows 방화벽 현황")
+        self.notebook.add(self.tab_wsl_fw, text="WSL 방화벽 현황")
 
         self._build_forward_tab(self.tab_forward)
         self._build_port_usage_tab(self.tab_ports)
         self._build_wsl_port_usage_tab(self.tab_wsl_ports)
+        self._build_win_firewall_tab(self.tab_win_fw)
+        self._build_wsl_firewall_tab(self.tab_wsl_fw)
 
         self.last_mirror_detail = None
+        self._win_fw_all_rules: list[dict] = []
         set_command_logger(self.log_command)
 
         self.refresh_table()
         self.refresh_mirror_status()
         self.refresh_ports()
         self.refresh_wsl_ports()
+        self.refresh_windows_firewall()
+        self.refresh_wsl_firewall()
 
     # ---------------- 탭 1: 포트 포워딩 관리 ----------------
     def _build_forward_tab(self, parent):
@@ -724,6 +850,141 @@ class PortForwardApp(tk.Tk):
             else:
                 messagebox.showinfo("완료", f"WSL PID {pid} ({process}) 프로세스를 종료했습니다.")
             self.refresh_wsl_ports()
+
+        self.run_bg(worker, on_done=done)
+
+    # ---------------- 탭 4: Windows 방화벽 현황 ----------------
+    WIN_FW_COLUMNS = ("displayname", "enabled", "direction", "action", "protocol", "localport", "remoteport", "profile")
+    WIN_FW_HEADERS = ("표시 이름", "사용", "방향", "동작", "프로토콜", "로컬 포트", "원격 포트", "프로파일")
+
+    def _build_win_firewall_tab(self, parent):
+        top = ttk.Frame(parent, padding=10)
+        top.pack(fill="x")
+
+        ttk.Label(top, text="Windows 방화벽 규칙", font=("맑은 고딕", 13, "bold")).pack(side="left")
+        ttk.Button(top, text="새로고침", command=self.refresh_windows_firewall).pack(side="right", padx=4)
+
+        self.win_fw_enabled_only = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            top, text="사용(Enabled) 규칙만 보기",
+            variable=self.win_fw_enabled_only, command=self._populate_win_firewall_grid,
+        ).pack(side="right", padx=10)
+
+        table_frame = ttk.Frame(parent, padding=(10, 0, 10, 10))
+        table_frame.pack(fill="both", expand=True)
+
+        self.win_fw_tree = ttk.Treeview(
+            table_frame, columns=self.WIN_FW_COLUMNS, show="headings", selectmode="browse"
+        )
+        for col, header in zip(self.WIN_FW_COLUMNS, self.WIN_FW_HEADERS):
+            self.win_fw_tree.heading(col, text=header)
+            width = 230 if col == "displayname" else 80
+            self.win_fw_tree.column(col, width=width, anchor="center" if col != "displayname" else "w")
+        self.win_fw_tree.pack(side="left", fill="both", expand=True)
+
+        win_fw_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.win_fw_tree.yview)
+        self.win_fw_tree.configure(yscrollcommand=win_fw_scrollbar.set)
+        win_fw_scrollbar.pack(side="right", fill="y")
+
+    def refresh_windows_firewall(self):
+        self.set_status("Windows 방화벽 규칙 조회 중... (규칙이 많으면 다소 시간이 걸립니다)")
+
+        def worker():
+            return get_windows_firewall_rules()
+
+        def done(rules):
+            self._win_fw_all_rules = rules
+            self._populate_win_firewall_grid()
+
+        self.run_bg(worker, on_done=done)
+
+    def _populate_win_firewall_grid(self):
+        for item in self.win_fw_tree.get_children():
+            self.win_fw_tree.delete(item)
+
+        rules = self._win_fw_all_rules
+        if self.win_fw_enabled_only.get():
+            rules = [r for r in rules if r.get("Enabled", "").strip().lower() == "true"]
+
+        for r in rules:
+            self.win_fw_tree.insert(
+                "", "end",
+                values=(
+                    r.get("DisplayName", ""),
+                    r.get("Enabled", ""),
+                    r.get("Direction", ""),
+                    r.get("Action", ""),
+                    r.get("Protocol", ""),
+                    r.get("LocalPort", ""),
+                    r.get("RemotePort", ""),
+                    r.get("Profile", ""),
+                ),
+            )
+
+        total = len(self._win_fw_all_rules)
+        shown = len(rules)
+        self.set_status(f"Windows 방화벽 규칙 {shown}건 표시 (전체 {total}건)")
+
+    # ---------------- 탭 5: WSL 방화벽 현황 ----------------
+    WSL_FW_COLUMNS = ("chain", "no", "action", "to", "from", "note")
+    WSL_FW_HEADERS = ("체인", "번호", "동작", "대상(To)", "출발지(From)", "비고")
+
+    def _build_wsl_firewall_tab(self, parent):
+        top = ttk.Frame(parent, padding=10)
+        top.pack(fill="x")
+
+        ttk.Label(top, text="WSL 방화벽 현황", font=("맑은 고딕", 13, "bold")).pack(side="left")
+        ttk.Button(top, text="새로고침", command=self.refresh_wsl_firewall).pack(side="right", padx=4)
+
+        self.wsl_fw_status_var = tk.StringVar(value="상태: 확인 중...")
+        ttk.Label(parent, textvariable=self.wsl_fw_status_var, padding=(10, 0, 10, 4)).pack(fill="x")
+
+        note = ttk.Label(
+            parent,
+            text="※ ufw가 설치되어 있으면 ufw 규칙을, 없으면 iptables 규칙을 표시합니다. "
+                 "iptables 조회는 root 권한(sudo)이 필요할 수 있습니다.",
+            padding=(10, 0, 10, 4),
+            foreground="#666666",
+        )
+        note.pack(fill="x")
+
+        table_frame = ttk.Frame(parent, padding=(10, 0, 10, 10))
+        table_frame.pack(fill="both", expand=True)
+
+        self.wsl_fw_tree = ttk.Treeview(
+            table_frame, columns=self.WSL_FW_COLUMNS, show="headings", selectmode="browse"
+        )
+        for col, header in zip(self.WSL_FW_COLUMNS, self.WSL_FW_HEADERS):
+            self.wsl_fw_tree.heading(col, text=header)
+            width = 60 if col in ("chain", "no") else 160
+            self.wsl_fw_tree.column(col, width=width, anchor="center")
+        self.wsl_fw_tree.pack(side="left", fill="both", expand=True)
+
+        wsl_fw_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.wsl_fw_tree.yview)
+        self.wsl_fw_tree.configure(yscrollcommand=wsl_fw_scrollbar.set)
+        wsl_fw_scrollbar.pack(side="right", fill="y")
+
+    def refresh_wsl_firewall(self):
+        self.set_status("WSL 방화벽 상태 조회 중...")
+        self.wsl_fw_status_var.set("상태: 확인 중...")
+
+        def worker():
+            return get_wsl_firewall_status()
+
+        def done(result):
+            mode, rows = result
+            self.wsl_fw_status_var.set(f"상태: {mode} (규칙 {len(rows)}건)")
+
+            for item in self.wsl_fw_tree.get_children():
+                self.wsl_fw_tree.delete(item)
+
+            for r in rows:
+                self.wsl_fw_tree.insert(
+                    "", "end",
+                    values=(r["chain"], r["no"], r["action"], r["to"], r["from"], r["note"]),
+                )
+
+            self.set_status(f"WSL 방화벽 규칙 {len(rows)}건 조회 완료 ({mode})")
 
         self.run_bg(worker, on_done=done)
 
