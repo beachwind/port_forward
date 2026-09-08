@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -410,6 +411,7 @@ class FileTransferDialog(tk.Toplevel):
             "clipboard": ("#718096", "clip"),
             "explorer": ("#d69e2e", "folder"),
             "screenshot": ("#2b6cb0", "camera"),
+            "web": ("#3182ce", "globe"),
         }
         return {name: self._action_icon(color, shape) for name, (color, shape) in specs.items()}
 
@@ -471,6 +473,10 @@ class FileTransferDialog(tk.Toplevel):
         elif shape == "arrow":
             image.put(color, to=(4, 7, 11, 9))
             image.put(color, to=(9, 5, 12, 11))
+        elif shape == "globe":
+            image.put(color, to=(3, 3, 13, 13))
+            image.put("#ffffff", to=(3, 7, 13, 9))
+            image.put("#ffffff", to=(7, 3, 9, 13))
         if shape in {"plus", "folder_plus", "file_plus"}:
             image.put("#ffffff", to=(7, 5, 9, 12))
             image.put("#ffffff", to=(5, 7, 11, 9))
@@ -504,7 +510,10 @@ class FileTransferDialog(tk.Toplevel):
         self._icon_button(toolbar, "refresh", "새로 고침", self.refresh_all, 0, 1).grid(
             row=0, column=1, padx=(12, 0)
         )
-        self._build_toolbar_buttons(toolbar, start_column=2)
+        self._icon_button(toolbar, "web", "웹 페이지 열기", self.open_web_page, 0, 2).grid(
+            row=0, column=2, padx=(6, 0)
+        )
+        self._build_toolbar_buttons(toolbar, start_column=3)
         toolbar.columnconfigure(40, weight=1)
         self.selected_terminal_label = ttk.Label(
             toolbar, textvariable=self.selected_terminal_var, foreground="#2b6cb0"
@@ -877,6 +886,19 @@ class FileTransferDialog(tk.Toplevel):
     def refresh_all(self) -> None:
         self.refresh_local()
         self.refresh_remote()
+
+    def open_web_page(self) -> None:
+        host = self.profile.get("host", "")
+        if not host:
+            messagebox.showerror("실행 실패", "서버 IP 정보가 없습니다.", parent=self)
+            return
+        url = f"http://{host}"
+        try:
+            webbrowser.open_new(url)
+        except Exception as exc:
+            messagebox.showerror("실행 실패", f"웹 페이지를 열 수 없습니다.\n{exc}", parent=self)
+            return
+        self.status.set(f"웹 페이지를 열었습니다. ({url})")
 
     def refresh_local(self) -> None:
         tree = self._tree_widget(self.local_tree)
@@ -4352,9 +4374,12 @@ class CommandManager(tk.Tk):
         ttk.Button(sidebar, text="Docker", command=self.open_docker_explorer).grid(
             row=11, column=0, sticky="ew", pady=3
         )
-        ttk.Separator(sidebar).grid(row=12, column=0, sticky="ew", pady=12)
-        ttk.Button(sidebar, text="수정", command=self.edit_selected).grid(row=13, column=0, sticky="ew", pady=3)
-        ttk.Button(sidebar, text="삭제", command=self.delete_selected).grid(row=14, column=0, sticky="ew", pady=3)
+        ttk.Button(sidebar, text="Web", command=self.open_web_selected).grid(
+            row=12, column=0, sticky="ew", pady=3
+        )
+        ttk.Separator(sidebar).grid(row=13, column=0, sticky="ew", pady=12)
+        ttk.Button(sidebar, text="수정", command=self.edit_selected).grid(row=14, column=0, sticky="ew", pady=3)
+        ttk.Button(sidebar, text="삭제", command=self.delete_selected).grid(row=15, column=0, sticky="ew", pady=3)
 
         main = ttk.Frame(self, padding=16)
         main.grid(row=0, column=1, sticky="nsew")
@@ -4687,6 +4712,22 @@ class CommandManager(tk.Tk):
             return
         profile, password, key_path = auth
         DockerTransferDialog(self, profile, password, key_path)
+
+    def open_web_selected(self) -> None:
+        profile = self._selected_profile()
+        if not profile:
+            return
+        host = profile.get("host", "")
+        if not host:
+            messagebox.showerror("실행 실패", "서버 IP 정보가 없습니다.", parent=self)
+            return
+        url = f"http://{host}"
+        try:
+            webbrowser.open_new(url)
+        except Exception as exc:
+            messagebox.showerror("실행 실패", f"웹 페이지를 열 수 없습니다.\n{exc}", parent=self)
+            return
+        self.status.set(f"{profile.get('name')} 서버 웹 페이지를 열었습니다. ({url})")
 
     def _run_transfer(
         self,
