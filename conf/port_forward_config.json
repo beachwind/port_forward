@@ -1,0 +1,50 @@
+[
+  {
+    "listenaddress": "0.0.0.0",
+    "listenport": 21391,
+    "connectaddress": "127.0.0.1",
+    "connectport": 3300,
+    "note": "",
+    "created_at": ""
+  },
+  {
+    "listenaddress": "0.0.0.0",
+    "listenport": 8080,
+    "connectaddress": "192.168.1.39",
+    "connectport": 8080,
+    "note": "",
+    "created_at": ""
+  },
+  {
+    "listenaddress": "0.0.0.0",
+    "listenport": 4000,
+    "connectaddress": "127.0.0.1",
+    "connectport": 4000,
+    "note": "",
+    "created_at": ""
+  },
+  {
+    "listenaddress": "0.0.0.0",
+    "listenport": 3001,
+    "connectaddress": "192.168.1.39",
+    "connectport": 4000,
+    "note": "",
+    "created_at": ""
+  },
+  {
+    "listenaddress": "192.168.1.39",
+    "listenport": 8080,
+    "connectaddress": "172.17.0.1",
+    "connectport": 8080,
+    "note": "",
+    "created_at": ""
+  },
+  {
+    "listenaddress": "0.0.0.0",
+    "listenport": 60102,
+    "connectaddress": "192.168.1.39",
+    "connectport": 60102,
+    "note": "",
+    "created_at": ""
+  }
+]

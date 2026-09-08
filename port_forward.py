@@ -1,0 +1,582 @@
+# -*- coding: utf-8 -*-
+"""
+Windows 포트 포워딩 관리 프로그램 (GUI, tkinter)
+-------------------------------------------------------------------
+netsh interface portproxy / Windows 방화벽 규칙을 GUI에서 관리합니다.
+
+- 포트 포워딩 추가 / 삭제 / 목록 조회 (netsh interface portproxy)
+- 방화벽 인바운드 규칙 추가 / 삭제 (New-NetFirewallRule / Remove-NetFirewallRule)
+- WSL2 내부 IP 자동 감지 버튼
+- 등록한 규칙을 JSON으로 저장해두고, 재부팅 후(WSL2 IP 변경 등) 일괄 재적용
+
+반드시 "관리자 권한"으로 실행해야 합니다.
+실행: python port_forward_gui.py
+(더블클릭 실행 시 관리자 권한이 아니면 자동으로 관리자 권한 재실행을 시도합니다)
+
+빌드(선택): pyinstaller --onefile --noconsole --uac-admin port_forward_gui.py
+"""
+
+import ctypes
+import json
+import os
+import subprocess
+import sys
+import threading
+from datetime import datetime
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+CONFIG_PATH = os.path.join(os.path.expanduser("~"), "port_forward_rules.json")
+
+
+# ------------------------------------------------------------------
+# 관리자 권한 처리
+# ------------------------------------------------------------------
+def is_admin() -> bool:
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def relaunch_as_admin():
+    """현재 스크립트를 관리자 권한으로 다시 실행하고 현재 프로세스는 종료."""
+    params = " ".join(f'"{a}"' for a in sys.argv)
+    ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", sys.executable, f'"{os.path.abspath(sys.argv[0])}" {params}', None, 1
+    )
+    sys.exit(0)
+
+
+# ------------------------------------------------------------------
+# 명령 실행 유틸
+# ------------------------------------------------------------------
+def run_command(cmd: str) -> tuple[int, str, str]:
+    result = subprocess.run(
+        ["cmd", "/c", cmd],
+        capture_output=True,
+        text=True,
+        encoding="cp949",
+        errors="ignore",
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+def run_powershell(cmd: str) -> tuple[int, str, str]:
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-Command", cmd],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+# ------------------------------------------------------------------
+# 규칙 저장(JSON)
+# ------------------------------------------------------------------
+def load_rules() -> list[dict]:
+    if not os.path.exists(CONFIG_PATH):
+        return []
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_rules(rules: list[dict]) -> None:
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(rules, f, ensure_ascii=False, indent=2)
+
+
+# ------------------------------------------------------------------
+# netsh / 방화벽 액션
+# ------------------------------------------------------------------
+def add_portproxy(listenport, connectport, connectaddress, listenaddress="0.0.0.0"):
+    cmd = (
+        f"netsh interface portproxy add v4tov4 "
+        f"listenport={listenport} listenaddress={listenaddress} "
+        f"connectport={connectport} connectaddress={connectaddress}"
+    )
+    return run_command(cmd)
+
+
+def delete_portproxy(listenport, listenaddress="0.0.0.0"):
+    cmd = (
+        f"netsh interface portproxy delete v4tov4 "
+        f"listenport={listenport} listenaddress={listenaddress}"
+    )
+    return run_command(cmd)
+
+
+def show_portproxy_all():
+    return run_command("netsh interface portproxy show all")
+
+
+def add_firewall_rule(name, port, protocol="TCP"):
+    cmd = (
+        f'New-NetFirewallRule -Name "{name}" -DisplayName "{name}" '
+        f'-Direction Inbound -Protocol {protocol} -LocalPort {port} -Action Allow'
+    )
+    return run_powershell(cmd)
+
+
+def delete_firewall_rule(name):
+    cmd = f'Remove-NetFirewallRule -Name "{name}"'
+    return run_powershell(cmd)
+
+
+def parse_portproxy_output(output: str) -> list[dict]:
+    """`netsh interface portproxy show all` 출력을 파싱해서
+    [{listenaddress, listenport, connectaddress, connectport}, ...] 형태로 반환."""
+    rules = []
+    lines = output.splitlines()
+    in_table = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("---"):
+            in_table = True
+            continue
+        if not stripped:
+            in_table = False
+            continue
+        if in_table:
+            parts = stripped.split()
+            if len(parts) == 4:
+                addr, port, caddr, cport = parts
+                try:
+                    rules.append({
+                        "listenaddress": addr,
+                        "listenport": int(port),
+                        "connectaddress": caddr,
+                        "connectport": int(cport),
+                    })
+                except ValueError:
+                    continue
+    return rules
+
+
+def get_wsl2_ip():
+    code, out, err = run_command("wsl hostname -I")
+    if code != 0 or not out:
+        return None
+    return out.split()[0].strip()
+
+
+# ------------------------------------------------------------------
+# GUI
+# ------------------------------------------------------------------
+class PortForwardApp(tk.Tk):
+    COLUMNS = ("listenaddress", "listenport", "connectaddress", "connectport", "note", "created_at")
+    HEADERS = ("대기 IP", "대기 포트", "대상 IP", "대상 포트", "메모", "등록일시")
+
+    def __init__(self):
+        super().__init__()
+        self.title("Windows 포트 포워딩 관리자")
+        self.geometry("880x560")
+        self.minsize(760, 480)
+
+        self._build_widgets()
+        self.refresh_table()
+
+    # ---------------- UI 구성 ----------------
+    def _build_widgets(self):
+        top = ttk.Frame(self, padding=10)
+        top.pack(fill="x")
+
+        ttk.Label(top, text="포트 포워딩 규칙", font=("맑은 고딕", 13, "bold")).pack(side="left")
+        ttk.Button(top, text="새 규칙 추가", command=self.open_add_dialog).pack(side="right", padx=4)
+        ttk.Button(top, text="netsh 원본 목록", command=self.show_raw_list).pack(side="right", padx=4)
+        ttk.Button(top, text="새로고침", command=self.refresh_table).pack(side="right", padx=4)
+
+        # 테이블
+        table_frame = ttk.Frame(self, padding=(10, 0, 10, 10))
+        table_frame.pack(fill="both", expand=True)
+
+        self.tree = ttk.Treeview(table_frame, columns=self.COLUMNS, show="headings", selectmode="browse")
+        for col, header in zip(self.COLUMNS, self.HEADERS):
+            self.tree.heading(col, text=header)
+            width = 90 if col in ("listenport", "connectport") else 150
+            self.tree.column(col, width=width, anchor="center")
+        self.tree.pack(side="left", fill="both", expand=True)
+
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+
+        # 하단 버튼
+        bottom = ttk.Frame(self, padding=10)
+        bottom.pack(fill="x")
+
+        ttk.Button(bottom, text="선택 규칙 삭제", command=self.delete_selected).pack(side="left", padx=4)
+        ttk.Button(bottom, text="선택 규칙 재적용", command=self.reapply_selected).pack(side="left", padx=4)
+        ttk.Button(bottom, text="전체 규칙 재적용", command=self.reapply_all).pack(side="left", padx=4)
+
+        ttk.Button(bottom, text="방화벽 규칙 추가", command=self.open_firewall_add_dialog).pack(side="right", padx=4)
+        ttk.Button(bottom, text="방화벽 규칙 삭제", command=self.open_firewall_delete_dialog).pack(side="right", padx=4)
+
+        # 상태 표시줄
+        self.status_var = tk.StringVar(value="준비됨")
+        status_bar = ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=4)
+        status_bar.pack(fill="x", side="bottom")
+
+    # ---------------- 공통 ----------------
+    def set_status(self, msg: str):
+        self.status_var.set(msg)
+        self.update_idletasks()
+
+    def refresh_table(self):
+        """실제 시스템에 등록된 포트 포워딩 목록(netsh)을 조회해서 그리드에 표시.
+        메모/등록일시는 로컬 JSON에 저장된 정보가 있으면 함께 보여준다."""
+        self.set_status("현재 등록된 포트 포워딩 조회 중...")
+
+        def worker():
+            return show_portproxy_all()
+
+        def done(result):
+            code, out, err = result
+            for item in self.tree.get_children():
+                self.tree.delete(item)
+
+            if code != 0:
+                self.set_status(f"조회 실패: {err or out}")
+                return
+
+            actual_rules = parse_portproxy_output(out)
+            local_rules = load_rules()
+            local_map = {
+                (r.get("listenaddress", "0.0.0.0"), r.get("listenport")): r
+                for r in local_rules
+            }
+
+            for r in actual_rules:
+                meta = local_map.get((r["listenaddress"], r["listenport"]), {})
+                self.tree.insert(
+                    "", "end",
+                    values=(
+                        r["listenaddress"],
+                        r["listenport"],
+                        r["connectaddress"],
+                        r["connectport"],
+                        meta.get("note", ""),
+                        meta.get("created_at", ""),
+                    ),
+                )
+
+            # 로컬 JSON에는 있지만 실제 시스템에는 없는(외부에서 삭제된) 항목은 정리
+            actual_keys = {(r["listenaddress"], r["listenport"]) for r in actual_rules}
+            pruned = [
+                r for r in local_rules
+                if (r.get("listenaddress", "0.0.0.0"), r.get("listenport")) in actual_keys
+            ]
+            if len(pruned) != len(local_rules):
+                save_rules(pruned)
+
+            self.set_status(f"현재 시스템에 등록된 규칙 {len(actual_rules)}건")
+
+        self.run_bg(worker, on_done=done)
+
+    def get_selected_rule(self):
+        sel = self.tree.selection()
+        if not sel:
+            return None
+        vals = self.tree.item(sel[0], "values")
+        return {
+            "listenaddress": vals[0],
+            "listenport": int(vals[1]),
+            "connectaddress": vals[2],
+            "connectport": int(vals[3]),
+            "note": vals[4],
+            "created_at": vals[5],
+        }
+
+    def run_bg(self, func, *args, on_done=None):
+        """블로킹될 수 있는 작업을 백그라운드 스레드에서 실행."""
+        def wrapper():
+            result = func(*args)
+            if on_done:
+                self.after(0, lambda: on_done(result))
+        threading.Thread(target=wrapper, daemon=True).start()
+
+    # ---------------- netsh 원본 목록 ----------------
+    def show_raw_list(self):
+        self.set_status("netsh 목록 조회 중...")
+
+        def done(result):
+            code, out, err = result
+            self.set_status("준비됨")
+            win = tk.Toplevel(self)
+            win.title("netsh interface portproxy show all")
+            win.geometry("640x400")
+            text = tk.Text(win, wrap="word")
+            text.pack(fill="both", expand=True)
+            text.insert("1.0", out if out else "(등록된 규칙이 없습니다)")
+            text.config(state="disabled")
+
+        self.run_bg(show_portproxy_all, on_done=done)
+
+    # ---------------- 규칙 추가 ----------------
+    def open_add_dialog(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("포트 포워딩 추가")
+        dialog.geometry("400x320")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        fields = {}
+
+        def add_row(label, key, default=""):
+            row = ttk.Frame(dialog, padding=(10, 6))
+            row.pack(fill="x")
+            ttk.Label(row, text=label, width=16).pack(side="left")
+            entry = ttk.Entry(row)
+            entry.insert(0, default)
+            entry.pack(side="left", fill="x", expand=True)
+            fields[key] = entry
+
+        add_row("대기 IP", "listenaddress", "0.0.0.0")
+        add_row("대기 포트", "listenport")
+        add_row("대상 IP", "connectaddress")
+        add_row("대상 포트", "connectport")
+        add_row("메모(선택)", "note")
+
+        def detect_wsl_ip():
+            self.set_status("WSL2 IP 확인 중...")
+
+            def done(ip):
+                self.set_status("준비됨")
+                if ip:
+                    fields["connectaddress"].delete(0, "end")
+                    fields["connectaddress"].insert(0, ip)
+                else:
+                    messagebox.showwarning("WSL2 IP", "WSL2 IP를 가져오지 못했습니다.\nWSL이 설치/실행 중인지 확인하세요.")
+
+            self.run_bg(get_wsl2_ip, on_done=done)
+
+        ttk.Button(dialog, text="WSL2 내부 IP 자동 감지 → 대상 IP에 채우기", command=detect_wsl_ip).pack(pady=6)
+
+        fw_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(dialog, text="방화벽 인바운드 규칙도 함께 추가", variable=fw_var).pack(pady=4)
+
+        def submit():
+            try:
+                listenport = int(fields["listenport"].get().strip())
+                connectport = int(fields["connectport"].get().strip())
+            except ValueError:
+                messagebox.showerror("입력 오류", "포트 번호는 숫자로 입력해주세요.")
+                return
+
+            listenaddress = fields["listenaddress"].get().strip() or "0.0.0.0"
+            connectaddress = fields["connectaddress"].get().strip()
+            note = fields["note"].get().strip()
+
+            if not connectaddress:
+                messagebox.showerror("입력 오류", "대상 IP를 입력해주세요.")
+                return
+
+            add_fw = fw_var.get()
+            dialog.destroy()
+            self.set_status("포트 포워딩 등록 중...")
+
+            def worker():
+                code, out, err = add_portproxy(listenport, connectport, connectaddress, listenaddress)
+                fw_result = None
+                if code == 0 and add_fw:
+                    fw_name = f"PortForward_{listenport}"
+                    fw_result = add_firewall_rule(fw_name, listenport)
+                return code, out, err, add_fw, fw_result
+
+            def done(result):
+                code, out, err, add_fw, fw_result = result
+                self.set_status("준비됨")
+                if code != 0:
+                    messagebox.showerror("실패", f"포트 포워딩 추가 실패:\n{err or out}")
+                    return
+
+                rules = load_rules()
+                rules.append({
+                    "listenaddress": listenaddress,
+                    "listenport": listenport,
+                    "connectaddress": connectaddress,
+                    "connectport": connectport,
+                    "note": note,
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                })
+                save_rules(rules)
+                self.refresh_table()
+
+                msg = f"{listenaddress}:{listenport} -> {connectaddress}:{connectport} 등록 완료"
+                if add_fw and fw_result:
+                    fcode, fout, ferr = fw_result
+                    if fcode == 0:
+                        msg += f"\n방화벽 규칙 'PortForward_{listenport}' 추가 완료"
+                    else:
+                        msg += f"\n(방화벽 규칙 추가 실패: {ferr or fout})"
+                messagebox.showinfo("완료", msg)
+
+            self.run_bg(worker, on_done=done)
+
+        ttk.Button(dialog, text="등록", command=submit).pack(pady=10)
+
+    # ---------------- 규칙 삭제 ----------------
+    def delete_selected(self):
+        rule = self.get_selected_rule()
+        if not rule:
+            messagebox.showinfo("안내", "삭제할 규칙을 목록에서 선택해주세요.")
+            return
+
+        if not messagebox.askyesno(
+            "삭제 확인",
+            f"{rule['listenaddress']}:{rule['listenport']} 규칙을 삭제할까요?"
+        ):
+            return
+
+        self.set_status("삭제 중...")
+
+        def worker():
+            return delete_portproxy(rule["listenport"], rule["listenaddress"])
+
+        def done(result):
+            code, out, err = result
+            self.set_status("준비됨")
+            if code != 0:
+                messagebox.showerror("실패", f"삭제 실패:\n{err or out}")
+                return
+            rules = load_rules()
+            rules = [
+                r for r in rules
+                if not (r["listenport"] == rule["listenport"] and r["listenaddress"] == rule["listenaddress"])
+            ]
+            save_rules(rules)
+            self.refresh_table()
+            messagebox.showinfo("완료", "삭제되었습니다.")
+
+        self.run_bg(worker, on_done=done)
+
+    # ---------------- 규칙 재적용 ----------------
+    def reapply_selected(self):
+        rule = self.get_selected_rule()
+        if not rule:
+            messagebox.showinfo("안내", "재적용할 규칙을 목록에서 선택해주세요.")
+            return
+        self._reapply([rule])
+
+    def reapply_all(self):
+        rules = load_rules()
+        if not rules:
+            messagebox.showinfo("안내", "저장된 규칙이 없습니다.")
+            return
+        self._reapply(rules)
+
+    def _reapply(self, rules):
+        self.set_status(f"{len(rules)}건 재적용 중...")
+
+        def worker():
+            results = []
+            for r in rules:
+                code, out, err = add_portproxy(
+                    r["listenport"], r["connectport"], r["connectaddress"], r["listenaddress"],
+                )
+                results.append((r, code, out, err))
+            return results
+
+        def done(results):
+            self.set_status("준비됨")
+            fail = [r for r, c, o, e in results if c != 0]
+            if fail:
+                messagebox.showwarning("일부 실패", f"{len(fail)}건 재적용 실패 (이미 등록되어 있을 수 있습니다)")
+            else:
+                messagebox.showinfo("완료", f"{len(results)}건 재적용 완료")
+            self.refresh_table()
+
+        self.run_bg(worker, on_done=done)
+
+    # ---------------- 방화벽 규칙 관리 ----------------
+    def open_firewall_add_dialog(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("방화벽 규칙 추가")
+        dialog.geometry("340x180")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="규칙 이름").pack(pady=(14, 2))
+        name_entry = ttk.Entry(dialog)
+        name_entry.pack(fill="x", padx=20)
+
+        ttk.Label(dialog, text="포트 번호").pack(pady=(10, 2))
+        port_entry = ttk.Entry(dialog)
+        port_entry.pack(fill="x", padx=20)
+
+        def submit():
+            name = name_entry.get().strip()
+            port_str = port_entry.get().strip()
+            if not name or not port_str.isdigit():
+                messagebox.showerror("입력 오류", "규칙 이름과 포트 번호를 올바르게 입력해주세요.")
+                return
+            dialog.destroy()
+            self.set_status("방화벽 규칙 추가 중...")
+
+            def done(result):
+                code, out, err = result
+                self.set_status("준비됨")
+                if code != 0:
+                    messagebox.showerror("실패", f"방화벽 규칙 추가 실패:\n{err or out}")
+                else:
+                    messagebox.showinfo("완료", f"방화벽 규칙 '{name}' 추가 완료")
+
+            self.run_bg(add_firewall_rule, name, int(port_str), on_done=done)
+
+        ttk.Button(dialog, text="추가", command=submit).pack(pady=14)
+
+    def open_firewall_delete_dialog(self):
+        dialog = tk.Toplevel(self)
+        dialog.title("방화벽 규칙 삭제")
+        dialog.geometry("340x140")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="삭제할 규칙 이름").pack(pady=(14, 2))
+        name_entry = ttk.Entry(dialog)
+        name_entry.pack(fill="x", padx=20)
+
+        def submit():
+            name = name_entry.get().strip()
+            if not name:
+                messagebox.showerror("입력 오류", "규칙 이름을 입력해주세요.")
+                return
+            dialog.destroy()
+            self.set_status("방화벽 규칙 삭제 중...")
+
+            def done(result):
+                code, out, err = result
+                self.set_status("준비됨")
+                if code != 0:
+                    messagebox.showerror("실패", f"방화벽 규칙 삭제 실패:\n{err or out}")
+                else:
+                    messagebox.showinfo("완료", f"방화벽 규칙 '{name}' 삭제 완료")
+
+            self.run_bg(delete_firewall_rule, name, on_done=done)
+
+        ttk.Button(dialog, text="삭제", command=submit).pack(pady=14)
+
+
+def main():
+    if os.name != "nt":
+        print("이 프로그램은 Windows 전용입니다 (netsh, PowerShell 필요).")
+        sys.exit(1)
+
+    if not is_admin():
+        relaunch_as_admin()
+        return
+
+    app = PortForwardApp()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()
