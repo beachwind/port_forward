@@ -501,6 +501,7 @@ class FileTransferDialog(tk.Toplevel):
         self._icon_button(toolbar, "refresh", "새로 고침", self.refresh_all, 0, 1).grid(
             row=0, column=1, padx=(12, 0)
         )
+        self._build_toolbar_buttons(toolbar, start_column=2)
 
         panes = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         panes.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
@@ -523,6 +524,10 @@ class FileTransferDialog(tk.Toplevel):
         ttk.Label(status_bar, textvariable=self.progress_text_var, width=6, anchor="e").grid(
             row=0, column=2, sticky="e", padx=(6, 0)
         )
+
+    def _build_toolbar_buttons(self, toolbar: ttk.Frame, start_column: int = 2) -> None:
+        """Hook for specialized transfer dialogs to add top toolbar buttons."""
+        return
 
     def _build_local_pane(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -2170,6 +2175,11 @@ class DockerTransferDialog(FileTransferDialog):
             image.put("#2b6cb0", to=(8, 7, 11, 9))
         return image
 
+    def _build_toolbar_buttons(self, toolbar: ttk.Frame, start_column: int = 2) -> None:
+        self._icon_button(toolbar, "docker_build", "Docker Build", self.build_docker_image, 0, start_column).grid(
+            row=0, column=start_column, padx=(6, 0)
+        )
+
     def _build_remote_pane(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(4, weight=1)
@@ -2773,6 +2783,12 @@ class DockerTransferDialog(FileTransferDialog):
         short_id = (container_id or "unknown")[:12]
         return DOCKER_LOG_DIR / f"{safe_name}_{short_id}.log"
 
+    def _docker_build_log_path(self, service_name: str) -> Path:
+        DOCKER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", service_name or "docker_build").strip() or "docker_build"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        return DOCKER_LOG_DIR / f"docker_build_{safe_name}_{timestamp}.log"
+
     def _append_docker_explore_log(
         self,
         container_id: str,
@@ -2892,24 +2908,99 @@ class DockerTransferDialog(FileTransferDialog):
             self.container_context = None
         self.refresh_remote()
 
+    def _docker_build_context_from_path_entry(self) -> dict | None:
+        typed = self.remote_path_var.get().strip()
+        if self.container_context is None or not typed.startswith("[Docker:"):
+            return None
+        marker = "] "
+        marker_index = typed.find(marker)
+        if marker_index == -1:
+            return None
+        container_path = typed[marker_index + len(marker):].strip()
+        if not container_path.startswith("/"):
+            return None
+        container_path = posixpath.normpath(container_path) or "/"
+        return {
+            "container_id": self.container_context["id"],
+            "container_name": self.container_context.get("name", self.container_context["id"]),
+            "path": container_path,
+        }
+
     def build_docker_image(self) -> None:
-        """docker build -t <태그> <경로> 를 원격 서버에서 실행하고 빌드 로그를 실시간으로 보여준다."""
-        context_path = simpledialog.askstring(
-            "Docker 빌드",
-            "Dockerfile이 있는 원격 서버 디렉터리 경로를 입력하세요.\n(예: /home/blitz/projects/blitz-admin-api)",
-            parent=self,
-        )
-        if not context_path:
+        """서비스 폴더명과 상위 version 파일을 기준으로 Docker 이미지를 빌드한다."""
+        build_context = self._docker_build_context_from_path_entry()
+        if not build_context:
+            messagebox.showinfo(
+                "Docker Build",
+                "Docker Build는 Docker 컨테이너 내부 경로에서만 실행할 수 있습니다.\n"
+                "Docker 컨테이너를 더블클릭하여 내부 폴더로 이동한 뒤 다시 실행하세요.",
+                parent=self,
+            )
             return
-        image_tag = simpledialog.askstring(
-            "Docker 빌드",
-            "빌드할 이미지 태그를 입력하세요.\n(예: blitz-admin-api:v18.6)",
-            parent=self,
+        script = """
+set -e
+container_id="$1"
+container_path="$2"
+service=$(basename "$container_path")
+container_parent=$(dirname "$container_path")
+work_root=$(mktemp -d /tmp/command_manager_docker_build.XXXXXX)
+trap 'rm -rf "$work_root"' EXIT
+context="$work_root/$service"
+version_file="$work_root/$service.version"
+echo "container=$container_id"
+echo "container_path=$container_path"
+echo "copy_context=$context"
+docker cp "$container_id:$container_path" "$context"
+docker cp "$container_id:$container_parent/$service.version" "$version_file" >/dev/null 2>&1 || true
+if [ -f "$context/Dockerfile" ]; then
+  echo "prebuild_cleanup=scan Dockerfile symlink targets"
+  sed -n -E 's/^[[:space:]]*RUN[[:space:]]+ln[[:space:]]+-s[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:];]+).*$/\1/p' "$context/Dockerfile" |
+  while IFS= read -r link_target; do
+    case "$link_target" in
+      /app/*)
+        rel=${link_target#/app/}
+        if [ -e "$context/$rel" ] || [ -L "$context/$rel" ]; then
+          echo "remove_existing_link_target=$context/$rel"
+          rm -rf -- "$context/$rel"
+        fi
+        ;;
+    esac
+  done
+fi
+service=$(basename "$context")
+version="latest"
+if [ -e "$version_file" ]; then
+  version=$(cat "$version_file")
+  version=$(awk -v ver="$version" 'BEGIN { printf "%.1f", ver + 0.1 }')
+  echo "$version" > "$version_file"
+  docker cp "$version_file" "$container_id:$container_parent/$service.version" >/dev/null 2>&1 || true
+  version="v$version"
+fi
+echo "service=$service"
+echo "version=$version"
+echo "context=$context"
+echo "container_version_file=$container_parent/$service.version"
+docker build --progress=plain --tag "$service:$version" "$context"
+""".strip()
+        context_path = build_context["path"]
+        service_hint = posixpath.basename(context_path.rstrip("/")) or "image"
+        command = (
+            "bash -lc "
+            + shlex.quote(script)
+            + " -- "
+            + shlex.quote(build_context["container_id"])
+            + " "
+            + shlex.quote(context_path)
         )
-        if not image_tag:
+        if not messagebox.askyesno(
+            "Docker Build",
+            f"[Docker:{build_context['container_name']}] {context_path} 경로를 기준으로 Docker 이미지를 빌드할까요?\n"
+            f"이미지 태그는 원격에서 {service_hint}:latest 또는 {service_hint}:vN.N 형식으로 자동 계산됩니다.",
+            parent=self,
+        ):
             return
-        command = f"cd {shlex.quote(context_path)} && docker build -t {shlex.quote(image_tag)} ."
-        self.run_streaming_command(f"Docker Build: {image_tag}", command)
+        log_path = self._docker_build_log_path(service_hint)
+        self.run_streaming_command(f"Docker Build: {service_hint}", command, log_path=log_path)
 
     def run_docker_container(self) -> None:
         """docker run -d --name ... -p ... <이미지> 를 원격 서버에서 실행하고 로그를 실시간으로 보여준다."""
@@ -2937,14 +3028,32 @@ class DockerTransferDialog(FileTransferDialog):
         self.status.set(f"{result['name']} 컨테이너 실행을 준비하는 중...")
         threading.Thread(target=prepare, daemon=True).start()
 
-    def run_streaming_command(self, title: str, command: str) -> None:
+    def run_streaming_command(self, title: str, command: str, log_path: Path | None = None) -> None:
         """원격 명령을 실행하고 실시간 출력을 로그 뷰어 창에 스트리밍한다.
         (docker build / docker run 등 시간이 걸리는 명령의 진행 상황 확인용)"""
         stop_event, run_event, append_text = self.show_log_viewer(title)
+        if log_path:
+            self.status.set(f"{title} 실행 중... 로그: {log_path}")
 
         def worker() -> None:
             channel = None
+            log_file = None
+
+            def write_log(text: str) -> None:
+                if log_file:
+                    log_file.write(text)
+                    log_file.flush()
+
             try:
+                if log_path:
+                    log_file = open(log_path, "a", encoding="utf-8", errors="replace")
+                    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    server_label = self.profile.get("name") or self.profile.get("host", "")
+                    log_file.write(f"[{timestamp}] {title}\n")
+                    log_file.write(f"서버: {server_label}\n")
+                    log_file.write(f"명령: {command}\n")
+                    log_file.write("-" * 80 + "\n")
+                    log_file.flush()
                 stdin, stdout, stderr = self.client.exec_command(command, get_pty=True)
                 stdin.close()
                 channel = stdout.channel
@@ -2956,24 +3065,38 @@ class DockerTransferDialog(FileTransferDialog):
                         data = channel.recv(4096)
                         if not data:
                             break
-                        append_text(data.decode("utf-8", errors="replace"))
+                        text = data.decode("utf-8", errors="replace")
+                        append_text(text)
+                        write_log(text)
                     elif channel.exit_status_ready():
                         while channel.recv_ready():
                             data = channel.recv(4096)
                             if not data:
                                 break
-                            append_text(data.decode("utf-8", errors="replace"))
+                            text = data.decode("utf-8", errors="replace")
+                            append_text(text)
+                            write_log(text)
                         break
                     else:
                         time.sleep(0.2)
                 if not stop_event.is_set():
                     exit_status = channel.recv_exit_status() if channel else None
-                    append_text(f"\n\n[명령 종료: 코드 {exit_status}]\n")
-                    self.after(0, lambda: self._streaming_command_finished(title, exit_status))
+                    finish_text = f"\n\n[명령 종료: 코드 {exit_status}]\n"
+                    append_text(finish_text)
+                    write_log(finish_text)
+                    self.after(0, lambda: self._streaming_command_finished(title, exit_status, log_path))
             except Exception as exc:
                 detail = str(exc)
-                append_text(f"\n[실행 오류: {detail}]\n")
+                error_text = f"\n[실행 오류: {detail}]\n"
+                append_text(error_text)
+                write_log(error_text)
             finally:
+                if log_file:
+                    try:
+                        log_file.write("-" * 80 + "\n")
+                        log_file.close()
+                    except Exception:
+                        pass
                 if channel:
                     try:
                         channel.close()
@@ -2982,8 +3105,11 @@ class DockerTransferDialog(FileTransferDialog):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _streaming_command_finished(self, title: str, exit_status: int | None) -> None:
-        self.status.set(f"{title} 완료 (종료 코드: {exit_status})")
+    def _streaming_command_finished(self, title: str, exit_status: int | None, log_path: Path | None = None) -> None:
+        if log_path:
+            self.status.set(f"{title} 완료 (종료 코드: {exit_status}) / 로그: {log_path}")
+        else:
+            self.status.set(f"{title} 완료 (종료 코드: {exit_status})")
         self.refresh_remote()
 
     # ------------------------------------------------------------------
