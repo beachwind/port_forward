@@ -770,24 +770,28 @@ class FileTransferDialog(tk.Toplevel):
                     command=lambda item=dict(editor): self.view_remote_with_editor(item),
                 )
 
+    def _open_remote_connection(self):
+        import paramiko
+
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            hostname=self.profile["host"],
+            port=int(self.profile.get("port") or 22),
+            username=self.profile["username"],
+            password=self.password or None,
+            key_filename=self.key_path or None,
+            look_for_keys=False,
+            allow_agent=False,
+            timeout=15,
+        )
+        sftp = client.open_sftp()
+        return client, sftp
+
     def _connect_remote(self) -> None:
         def worker() -> None:
             try:
-                import paramiko
-
-                client = paramiko.SSHClient()
-                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-                client.connect(
-                    hostname=self.profile["host"],
-                    port=int(self.profile.get("port") or 22),
-                    username=self.profile["username"],
-                    password=self.password or None,
-                    key_filename=self.key_path or None,
-                    look_for_keys=False,
-                    allow_agent=False,
-                    timeout=15,
-                )
-                sftp = client.open_sftp()
+                client, sftp = self._open_remote_connection()
                 with self.sftp_lock:
                     self.client = client
                     self.sftp = sftp
@@ -803,6 +807,72 @@ class FileTransferDialog(tk.Toplevel):
     def _remote_connect_failed(self, detail: str) -> None:
         self.status.set(f"원격 서버 연결 실패: {detail}")
         messagebox.showerror("연결 실패", f"원격 서버에 연결할 수 없습니다.\n{detail}", parent=self)
+
+    @staticmethod
+    def _is_connection_error(exc: Exception) -> bool:
+        """소켓/세션이 끊어져 재접속이 필요한 오류인지 판별한다."""
+        if isinstance(exc, (EOFError, OSError, ConnectionError)):
+            return True
+        try:
+            import paramiko
+
+            if isinstance(exc, paramiko.SSHException):
+                return True
+        except ImportError:
+            pass
+        message = str(exc).lower()
+        keywords = (
+            "socket is closed",
+            "not connected",
+            "connection reset",
+            "broken pipe",
+            "timed out",
+            "timeout",
+            "server connection dropped",
+            "session is closed",
+        )
+        return any(keyword in message for keyword in keywords)
+
+    def _reconnect_remote(self) -> None:
+        if getattr(self, "_reconnecting", False):
+            return
+        self._reconnecting = True
+        self.status.set("원격 연결이 끊어져 재접속을 시도합니다...")
+
+        with self.sftp_lock:
+            old_sftp, old_client = self.sftp, getattr(self, "client", None)
+            self.sftp = None
+        for closable in (old_sftp, old_client):
+            try:
+                if closable:
+                    closable.close()
+            except Exception:
+                pass
+
+        def worker() -> None:
+            try:
+                client, sftp = self._open_remote_connection()
+                with self.sftp_lock:
+                    self.client = client
+                    self.sftp = sftp
+                    if not self.remote_cwd:
+                        self.remote_cwd = sftp.normalize(".")
+            except Exception as exc:
+                detail = str(exc)
+                self.after(0, lambda: self._reconnect_remote_failed(detail))
+                return
+            self.after(0, self._reconnect_remote_succeeded)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _reconnect_remote_succeeded(self) -> None:
+        self._reconnecting = False
+        self.status.set("원격 서버 재접속에 성공했습니다.")
+        self.refresh_remote()
+
+    def _reconnect_remote_failed(self, detail: str) -> None:
+        self._reconnecting = False
+        self.status.set(f"원격 서버 재접속 실패: {detail}")
 
     def refresh_all(self) -> None:
         self.refresh_local()
@@ -840,6 +910,7 @@ class FileTransferDialog(tk.Toplevel):
 
     def refresh_remote(self) -> None:
         if not self.sftp:
+            self._reconnect_remote()
             return
         tree = self._tree_widget(self.remote_tree)
         tree.delete(*tree.get_children())
@@ -853,7 +924,10 @@ class FileTransferDialog(tk.Toplevel):
                     entries = self.sftp.listdir_attr(self.remote_cwd)
             except Exception as exc:
                 detail = str(exc)
-                self.after(0, lambda: self.status.set(f"원격 폴더를 읽을 수 없습니다: {detail}"))
+                if self._is_connection_error(exc):
+                    self.after(0, self._reconnect_remote)
+                else:
+                    self.after(0, lambda: self.status.set(f"원격 폴더를 읽을 수 없습니다: {detail}"))
                 return
             rows = []
             for item in sorted(entries, key=lambda e: (not stat.S_ISDIR(e.st_mode), e.filename.lower())):
@@ -2242,6 +2316,7 @@ class DockerTransferDialog(FileTransferDialog):
         icons["docker_build"] = self._docker_action_icon("build")
         icons["docker_run"] = self._docker_action_icon("run")
         icons["docker_history"] = self._docker_action_icon("history")
+        icons["docker_nginx_reload"] = self._docker_action_icon("reload")
         return icons
 
     def _docker_action_icon(self, shape: str) -> tk.PhotoImage:
@@ -2267,6 +2342,14 @@ class DockerTransferDialog(FileTransferDialog):
             image.put("#f7fafc", to=(4, 4, 12, 12))
             image.put("#2b6cb0", to=(7, 5, 9, 8))
             image.put("#2b6cb0", to=(8, 7, 11, 9))
+        elif shape == "reload":
+            # 순환(재시작) 화살표 모양. nginx 로고를 연상시키는 녹색으로 표시한다.
+            image.put("#2f855a", to=(3, 4, 12, 6))
+            image.put("#2f855a", to=(10, 4, 12, 9))
+            image.put("#2f855a", to=(4, 10, 13, 12))
+            image.put("#2f855a", to=(4, 7, 6, 12))
+            image.put("#2f855a", to=(11, 2, 14, 5))
+            image.put("#2f855a", to=(2, 11, 5, 14))
         return image
 
     def _build_toolbar_buttons(self, toolbar: ttk.Frame, start_column: int = 2) -> None:
@@ -2328,6 +2411,7 @@ class DockerTransferDialog(FileTransferDialog):
             ("docker_stop", "Docker 컨테이너 중지", self.stop_selected_container),
             ("docker_build", "Docker 컨테이너 빌드", self.build_docker_image),
             ("docker_run", "Docker 컨테이너 run", self.run_docker_container),
+            ("docker_nginx_reload", "Nginx 서비스 재로드", self.reload_nginx_selected_container),
             ("docker_history", "컨테이너 탐색 기록 보기", lambda: self.view_container_explore_log()),
         ]
         for column, (icon, tooltip, command) in enumerate(remote_actions):
@@ -2339,6 +2423,7 @@ class DockerTransferDialog(FileTransferDialog):
 
     def refresh_remote(self) -> None:
         if not self.client:
+            self._reconnect_remote()
             return
         if self.container_context is not None:
             self._refresh_container_listing()
@@ -2347,6 +2432,7 @@ class DockerTransferDialog(FileTransferDialog):
 
     def _refresh_host_listing(self) -> None:
         if not self.sftp:
+            self._reconnect_remote()
             return
         tree = self._tree_widget(self.remote_tree)
         tree.delete(*tree.get_children())
@@ -2360,7 +2446,10 @@ class DockerTransferDialog(FileTransferDialog):
                     entries = self.sftp.listdir_attr(self.remote_cwd)
             except Exception as exc:
                 detail = str(exc)
-                self.after(0, lambda: self.status.set(f"원격 폴더를 읽을 수 없습니다: {detail}"))
+                if self._is_connection_error(exc):
+                    self.after(0, self._reconnect_remote)
+                else:
+                    self.after(0, lambda: self.status.set(f"원격 폴더를 읽을 수 없습니다: {detail}"))
                 return
             rows = []
             for item in sorted(entries, key=lambda e: (not stat.S_ISDIR(e.st_mode), e.filename.lower())):
@@ -2797,6 +2886,7 @@ class DockerTransferDialog(FileTransferDialog):
                 menu.add_command(label="Docker 컨테이너 중지", command=self.stop_selected_container)
                 menu.add_command(label="Docker 컨테이너 빌드", command=self.build_docker_image)
                 menu.add_command(label="Docker 컨테이너 run", command=self.run_docker_container)
+                menu.add_command(label="Nginx 서비스 재로드", command=self.reload_nginx_selected_container)
                 menu.add_separator()
                 menu.add_command(label="새로 고침", command=self.refresh_remote)
                 try:
@@ -3009,6 +3099,48 @@ class DockerTransferDialog(FileTransferDialog):
         if self.container_context and self.container_context["id"] == container["id"]:
             self.container_context = None
         self.refresh_remote()
+
+    def reload_nginx_selected_container(self) -> None:
+        """선택(또는 현재 탐색 중인) 컨테이너에서 nginx 설정을 재로드한다.
+        (docker exec [컨테이너 ID] nginx -s reload)"""
+        container = self._selected_or_current_container()
+        if not container:
+            messagebox.showinfo(
+                "선택 필요",
+                "Nginx 를 재로드할 컨테이너를 원격 목록에서 선택하거나, 해당 컨테이너 내부를 탐색 중이어야 합니다.",
+                parent=self,
+            )
+            return
+        if not messagebox.askyesno(
+            "Nginx 서비스 재로드",
+            f"'{container['name']}' 컨테이너에서 Nginx 설정을 재로드할까요?\n"
+            f"(docker exec {container['id']} nginx -s reload)",
+            parent=self,
+        ):
+            return
+        self.status.set(f"{container['name']} 컨테이너의 Nginx 를 재로드하는 중...")
+
+        def worker() -> None:
+            try:
+                # exec_command()에는 tty가 할당되지 않으므로 대화형 옵션(-it)은
+                # 사용하지 않는다. nginx -s reload 는 tty 없이도 정상 동작한다.
+                command = f"docker exec {shlex.quote(container['id'])} nginx -s reload"
+                self._run_remote_ok(command, timeout=30)
+            except Exception as exc:
+                detail = str(exc)
+                self.after(0, lambda: self._container_action_failed("Nginx 서비스 재로드", detail))
+                return
+            self.after(0, lambda: self._nginx_reloaded(container))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _nginx_reloaded(self, container: dict) -> None:
+        self.status.set(f"{container['name']} 컨테이너의 Nginx 설정을 재로드했습니다.")
+        messagebox.showinfo(
+            "Nginx 재로드 완료",
+            f"'{container['name']}' 컨테이너에서 Nginx 설정을 재로드했습니다.",
+            parent=self,
+        )
 
     def _docker_build_context_from_path_entry(self) -> dict | None:
         typed = self.remote_path_var.get().strip()
