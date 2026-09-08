@@ -72,6 +72,47 @@ def format_mtime(timestamp: float | int | None) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
+CAPTURE_SCREEN_COMMAND = "/usr/local/bin/capture_screen.sh"
+
+
+def exec_remote_sudo(
+    client,
+    command: str,
+    password: str = "",
+    timeout: float | None = 20,
+) -> tuple[str, str, int]:
+    """원격 client에서 command를 sudo로 실행한다.
+
+    먼저 비밀번호 없는 sudo(`sudo -n`)를 시도하고, 실패하면 보유한 서버 암호를
+    표준입력으로 넘겨 `sudo -S`로 재시도한다. (stdout, stderr, exit_code)를 반환한다.
+    """
+    stdin, stdout, stderr = client.exec_command(f"sudo -n {command}", timeout=timeout)
+    stdin.close()
+    out = stdout.read().decode("utf-8", errors="replace")
+    err = stderr.read().decode("utf-8", errors="replace").strip()
+    exit_code = stdout.channel.recv_exit_status()
+    if exit_code == 0:
+        return out, "", 0
+
+    if password:
+        stdin, stdout, stderr = client.exec_command(f"sudo -S -p '' {command}", timeout=timeout)
+        stdin.write(password + "\n")
+        stdin.flush()
+        try:
+            stdin.channel.shutdown_write()
+        except Exception:
+            pass
+        out2 = stdout.read().decode("utf-8", errors="replace")
+        err2 = stderr.read().decode("utf-8", errors="replace").strip()
+        exit_code2 = stdout.channel.recv_exit_status()
+        if exit_code2 == 0:
+            return out2, "", 0
+        combined_err = err2 or err
+        return out2, combined_err, exit_code2
+
+    return out, err, exit_code
+
+
 class ToolTip:
     def __init__(self, widget: tk.Widget, text: str):
         self.widget = widget
@@ -898,7 +939,38 @@ class FileTransferDialog(tk.Toplevel):
         except Exception as exc:
             messagebox.showerror("실행 실패", f"웹 페이지를 열 수 없습니다.\n{exc}", parent=self)
             return
-        self.status.set(f"웹 페이지를 열었습니다. ({url})")
+        self.status.set(f"웹 페이지를 열었습니다. ({url}) 화면 캡처 명령을 실행하는 중...")
+        self._run_capture_screen_command()
+
+    def _run_capture_screen_command(self) -> None:
+        if not self.client:
+            self.status.set("원격 서버에 연결되어 있지 않아 화면 캡처 명령을 실행할 수 없습니다.")
+            return
+
+        def worker() -> None:
+            try:
+                with self.sftp_lock:
+                    out, err, exit_code = exec_remote_sudo(
+                        self.client, CAPTURE_SCREEN_COMMAND, self.password
+                    )
+            except Exception as exc:
+                self.after(0, lambda: self._capture_screen_command_done(False, str(exc)))
+                return
+            if exit_code == 0:
+                self.after(0, lambda: self._capture_screen_command_done(True, out.strip()))
+            else:
+                self.after(0, lambda: self._capture_screen_command_done(False, err or out.strip()))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _capture_screen_command_done(self, success: bool, detail: str) -> None:
+        if success:
+            self.status.set(f"화면 캡처 명령({CAPTURE_SCREEN_COMMAND}) 실행이 완료되었습니다.")
+        else:
+            self.status.set(f"화면 캡처 명령 실행 실패: {detail}")
+            messagebox.showerror(
+                "명령 실행 실패", f"{CAPTURE_SCREEN_COMMAND} 실행에 실패했습니다.\n{detail}", parent=self
+            )
 
     def refresh_local(self) -> None:
         tree = self._tree_widget(self.local_tree)
@@ -4727,7 +4799,54 @@ class CommandManager(tk.Tk):
         except Exception as exc:
             messagebox.showerror("실행 실패", f"웹 페이지를 열 수 없습니다.\n{exc}", parent=self)
             return
-        self.status.set(f"{profile.get('name')} 서버 웹 페이지를 열었습니다. ({url})")
+        self.status.set(f"{profile.get('name')} 서버 웹 페이지를 열었습니다. ({url}) 화면 캡처 명령을 실행하는 중...")
+
+        auth = self._password_for_profile(profile)
+        if not auth:
+            return
+        profile, password, key_path = auth
+        self._run_remote_capture_screen(profile, password, key_path)
+
+    def _run_remote_capture_screen(self, profile: dict, password: str, key_path: str) -> None:
+        def worker() -> None:
+            try:
+                import paramiko
+
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=profile["host"],
+                    port=int(profile.get("port") or 22),
+                    username=profile["username"],
+                    password=password or None,
+                    key_filename=key_path or None,
+                    look_for_keys=False,
+                    allow_agent=False,
+                    timeout=15,
+                )
+                try:
+                    out, err, exit_code = exec_remote_sudo(client, CAPTURE_SCREEN_COMMAND, password)
+                finally:
+                    client.close()
+            except Exception as exc:
+                self.after(0, lambda: self._remote_capture_screen_done(profile, False, str(exc)))
+                return
+            if exit_code == 0:
+                self.after(0, lambda: self._remote_capture_screen_done(profile, True, out.strip()))
+            else:
+                self.after(0, lambda: self._remote_capture_screen_done(profile, False, err or out.strip()))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _remote_capture_screen_done(self, profile: dict, success: bool, detail: str) -> None:
+        name = profile.get("name", profile.get("host", ""))
+        if success:
+            self.status.set(f"{name} 서버 화면 캡처 명령({CAPTURE_SCREEN_COMMAND}) 실행이 완료되었습니다.")
+        else:
+            self.status.set(f"{name} 서버 화면 캡처 명령 실행 실패: {detail}")
+            messagebox.showerror(
+                "명령 실행 실패", f"{CAPTURE_SCREEN_COMMAND} 실행에 실패했습니다.\n{detail}", parent=self
+            )
 
     def _run_transfer(
         self,
