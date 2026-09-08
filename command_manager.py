@@ -69,21 +69,6 @@ def format_mtime(timestamp: float | int | None) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
-# `docker exec <container> sh -c "ls -la -- <path>"` 출력의 각 줄을 파싱하기 위한 정규식.
-# 예: "drwxr-xr-x 12 root root 4096 Jan  1 00:00 etc" / "-rw-r--r-- 1 root root 123 Jan  1 00:00 file -> target"
-CONTAINER_LS_LINE_RE = re.compile(
-    r"^(?P<perm>[bcdlpsD-][-rwxXsStTugo]{9}\+?)\s+"
-    r"(?P<links>\d+)\s+"
-    r"(?P<owner>\S+)\s+"
-    r"(?P<group>\S+)\s+"
-    r"(?P<size>\d+)\s+"
-    r"(?P<month>\S+)\s+"
-    r"(?P<day>\S+)\s+"
-    r"(?P<time>\S+)\s+"
-    r"(?P<name>.+)$"
-)
-
-
 class ToolTip:
     def __init__(self, widget: tk.Widget, text: str):
         self.widget = widget
@@ -2283,33 +2268,50 @@ class DockerTransferDialog(FileTransferDialog):
         threading.Thread(target=worker, daemon=True).start()
 
     def _list_container_directory(self, container_id: str, path: str) -> tuple[list[dict], str]:
-        """`docker exec <container> sh -c "ls -la -- <path>"` 결과를 파싱해
-        디렉토리 항목 목록을 만든다."""
+        """컨테이너 내부 디렉터리 목록을 가져온다.
+
+        `ls -la` 출력 텍스트를 정규식으로 파싱하는 방식은 베이스 이미지(alpine/busybox,
+        debian 등)마다 컬럼 구성이나 옵션 지원 여부가 달라 일부 컨테이너에서 목록이
+        전혀 표시되지 않는 문제가 있었다. 대신 POSIX 셸의 글롭(`.* *`)과 `[ -d ]` 테스트로
+        직접 순회하여, 어떤 셸/베이스 이미지에서도 동일하게 동작하도록 만든다.
+        각 줄은 "타입\\t크기\\t수정시각(epoch)\\t이름" 형식(탭 구분)으로 출력된다.
+        """
         if not self.client:
             return [], ""
-        inner_cmd = f"ls -la -- {shlex.quote(path)}"
-        command = f"docker exec {shlex.quote(container_id)} sh -c {shlex.quote(inner_cmd)}"
+        script = (
+            'cd -- "$1" 2>/dev/null || exit 1; '
+            'for f in .* *; do '
+            'case "$f" in .|..) continue;; esac; '
+            '[ -e "$f" ] || [ -L "$f" ] || continue; '
+            'if [ -d "$f" ]; then t=D; s=""; else t=F; s=$(wc -c < "$f" 2>/dev/null | tr -d " "); fi; '
+            'm=$(stat -c %Y -- "$f" 2>/dev/null); '
+            'printf "%s\\t%s\\t%s\\t%s\\n" "$t" "$s" "$m" "$f"; '
+            'done'
+        )
+        inner_cmd = f"sh -c {shlex.quote(script)} sh {shlex.quote(path)}"
+        command = f"docker exec {shlex.quote(container_id)} {inner_cmd}"
         try:
-            data, err, exit_code = self._exec_with_sudo_fallback(command, timeout=10)
+            data, err, exit_code = self._exec_with_sudo_fallback(command, timeout=15)
         except Exception as exc:
             return [], str(exc)
         if exit_code != 0:
-            return [], err or f"ls 종료 코드: {exit_code}"
+            return [], err or f"디렉터리 조회 실패 (종료 코드 {exit_code})"
         output = data.decode("utf-8", errors="replace")
         entries: list[dict] = []
         for line in output.splitlines():
-            match = CONTAINER_LS_LINE_RE.match(line.strip())
-            if not match:
+            if not line:
                 continue
-            name = match.group("name")
-            if " -> " in name:
-                name = name.split(" -> ", 1)[0]
-            if name in (".", ".."):
+            parts = line.split("\t")
+            if len(parts) < 4:
                 continue
-            perm = match.group("perm")
-            is_dir = perm[0] == "d"
-            size = None if is_dir else int(match.group("size"))
-            modified = f"{match.group('month')} {match.group('day')} {match.group('time')}"
+            type_flag, size_str, mtime_str, name = parts[0], parts[1], parts[2], "\t".join(parts[3:])
+            is_dir = type_flag == "D"
+            size = None
+            if not is_dir and size_str.strip().isdigit():
+                size = int(size_str.strip())
+            modified = ""
+            if mtime_str.strip().isdigit():
+                modified = format_mtime(int(mtime_str.strip()))
             entries.append({"name": name, "is_dir": is_dir, "size": size, "modified": modified})
         entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
         return entries, ""
