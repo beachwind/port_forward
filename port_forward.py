@@ -25,7 +25,7 @@ import threading
 from datetime import datetime
 
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), "port_forward_rules.json")
 
@@ -193,6 +193,9 @@ class PortForwardApp(tk.Tk):
         ttk.Button(top, text="새 규칙 추가", command=self.open_add_dialog).pack(side="right", padx=4)
         ttk.Button(top, text="netsh 원본 목록", command=self.show_raw_list).pack(side="right", padx=4)
         ttk.Button(top, text="새로고침", command=self.refresh_table).pack(side="right", padx=4)
+        ttk.Separator(top, orient="vertical").pack(side="right", fill="y", padx=6)
+        ttk.Button(top, text="열기", command=self.open_load_dialog).pack(side="right", padx=4)
+        ttk.Button(top, text="저장", command=self.open_save_dialog).pack(side="right", padx=4)
 
         # 테이블
         table_frame = ttk.Frame(self, padding=(10, 0, 10, 10))
@@ -278,6 +281,122 @@ class PortForwardApp(tk.Tk):
                 save_rules(pruned)
 
             self.set_status(f"현재 시스템에 등록된 규칙 {len(actual_rules)}건")
+
+        self.run_bg(worker, on_done=done)
+
+    def get_grid_rules(self) -> list[dict]:
+        """현재 그리드(메인 화면)에 표시된 모든 행을 규칙 목록으로 반환."""
+        rules = []
+        for item in self.tree.get_children():
+            vals = self.tree.item(item, "values")
+            rules.append({
+                "listenaddress": vals[0],
+                "listenport": int(vals[1]),
+                "connectaddress": vals[2],
+                "connectport": int(vals[3]),
+                "note": vals[4],
+                "created_at": vals[5],
+            })
+        return rules
+
+    # ---------------- 파일로 저장 / 파일에서 열기 ----------------
+    def open_save_dialog(self):
+        rules = self.get_grid_rules()
+        if not rules:
+            messagebox.showinfo("안내", "저장할 규칙이 없습니다.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="포트 포워딩 설정 저장",
+            defaultextension=".json",
+            filetypes=[("JSON 파일", "*.json"), ("모든 파일", "*.*")],
+            initialfile="port_forward_config.json",
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(rules, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            messagebox.showerror("실패", f"파일 저장 중 오류가 발생했습니다:\n{e}")
+            return
+
+        messagebox.showinfo("완료", f"{len(rules)}건의 규칙을 저장했습니다.\n{file_path}")
+
+    def open_load_dialog(self):
+        file_path = filedialog.askopenfilename(
+            title="포트 포워딩 설정 열기",
+            filetypes=[("JSON 파일", "*.json"), ("모든 파일", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                rules = json.load(f)
+        except Exception as e:
+            messagebox.showerror("실패", f"파일을 읽는 중 오류가 발생했습니다:\n{e}")
+            return
+
+        if not isinstance(rules, list) or not rules:
+            messagebox.showwarning("안내", "파일에 적용할 규칙이 없습니다.")
+            return
+
+        if not messagebox.askyesno(
+            "규칙 적용",
+            f"불러온 {len(rules)}건의 규칙을 현재 시스템에 적용(netsh 등록)할까요?\n"
+            "(WSL2 IP가 바뀌었다면 적용 전에 파일 내용을 직접 수정해주세요)"
+        ):
+            return
+
+        self.set_status(f"{len(rules)}건 적용 중...")
+
+        def worker():
+            results = []
+            for r in rules:
+                try:
+                    listenaddress = r.get("listenaddress", "0.0.0.0")
+                    listenport = int(r["listenport"])
+                    connectaddress = r["connectaddress"]
+                    connectport = int(r["connectport"])
+                except (KeyError, ValueError, TypeError):
+                    results.append((r, -1, "", "잘못된 규칙 형식"))
+                    continue
+                code, out, err = add_portproxy(listenport, connectport, connectaddress, listenaddress)
+                results.append((r, code, out, err))
+            return results
+
+        def done(results):
+            self.set_status("준비됨")
+            success = [r for r, c, o, e in results if c == 0]
+            fail = [r for r, c, o, e in results if c != 0]
+
+            if success:
+                local_rules = load_rules()
+                existing_keys = {
+                    (x.get("listenaddress", "0.0.0.0"), x.get("listenport")) for x in local_rules
+                }
+                for r in success:
+                    key = (r.get("listenaddress", "0.0.0.0"), int(r["listenport"]))
+                    if key not in existing_keys:
+                        local_rules.append({
+                            "listenaddress": r.get("listenaddress", "0.0.0.0"),
+                            "listenport": int(r["listenport"]),
+                            "connectaddress": r["connectaddress"],
+                            "connectport": int(r["connectport"]),
+                            "note": r.get("note", ""),
+                            "created_at": r.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        })
+                        existing_keys.add(key)
+                save_rules(local_rules)
+
+            self.refresh_table()
+
+            msg = f"{len(success)}건 적용 완료"
+            if fail:
+                msg += f"\n{len(fail)}건 실패 (이미 등록되어 있거나 형식이 잘못되었을 수 있습니다)"
+            messagebox.showinfo("완료", msg)
 
         self.run_bg(worker, on_done=done)
 
