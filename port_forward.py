@@ -355,6 +355,127 @@ def kill_process(pid: int) -> tuple[int, str, str]:
 
 
 # ------------------------------------------------------------------
+# WSL 내부 포트 점유(LISTENING) 조회
+# ------------------------------------------------------------------
+def _parse_ss_output(out: str) -> list[dict]:
+    """`ss -tulnpH` 출력을 파싱.
+    반환: [{proto, state, address, port, pid, process}, ...]"""
+    results = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 5)
+        if len(parts) < 5:
+            continue
+        proto = parts[0].lower()
+        if not proto.startswith(("tcp", "udp")):
+            continue
+        state = parts[1].upper()
+        if proto.startswith("tcp") and state != "LISTEN":
+            continue
+
+        local = parts[4]
+        extra = parts[5] if len(parts) > 5 else ""
+        addr, _, port_str = local.rpartition(":")
+        if not port_str.isdigit():
+            continue
+        port = int(port_str)
+        addr = addr.strip("[]") or "*"
+
+        m = re.search(r'\("([^"]+)",pid=(\d+)', extra)
+        if m:
+            process = m.group(1)
+            pid = int(m.group(2))
+        else:
+            process = "(권한 필요)"
+            pid = None
+
+        results.append({
+            "proto": proto,
+            "state": state if proto.startswith("tcp") else "LISTEN",
+            "address": addr,
+            "port": port,
+            "pid": pid,
+            "process": process,
+        })
+    return results
+
+
+def _parse_wsl_netstat_output(out: str) -> list[dict]:
+    """`netstat -tulnpn` (Linux) 출력을 파싱. (ss를 사용할 수 없을 때의 대안)"""
+    results = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        proto = parts[0].lower()
+        if proto.startswith("tcp"):
+            if len(parts) < 7:
+                continue
+            local = parts[3]
+            state = parts[5].upper()
+            pidprog = parts[6]
+            if state != "LISTEN":
+                continue
+        elif proto.startswith("udp"):
+            if len(parts) < 6:
+                continue
+            local = parts[3]
+            state = "LISTEN"
+            pidprog = parts[5]
+        else:
+            continue
+
+        addr, _, port_str = local.rpartition(":")
+        if not port_str.isdigit():
+            continue
+        port = int(port_str)
+        addr = addr.strip("[]") or "*"
+
+        if pidprog and pidprog != "-" and "/" in pidprog:
+            pid_str, _, process = pidprog.partition("/")
+            pid = int(pid_str) if pid_str.isdigit() else None
+            process = process or "(알 수 없음)"
+        else:
+            pid = None
+            process = "(권한 필요)"
+
+        results.append({
+            "proto": proto,
+            "state": state,
+            "address": addr,
+            "port": port,
+            "pid": pid,
+            "process": process,
+        })
+    return results
+
+
+def get_wsl_listening_ports() -> list[dict]:
+    """WSL(리눅스) 내부에서 LISTEN 중인 TCP/UDP 포트 목록을 조회.
+    `ss -tulnp`를 우선 사용하고, 사용할 수 없으면 `netstat -tulnpn`으로 대체한다.
+    반환: [{proto, state, address, port, pid, process}, ...]"""
+    code, out, err = run_command('wsl bash -c "ss -tulnpH 2>/dev/null"')
+    if code == 0 and out.strip():
+        parsed = _parse_ss_output(out)
+        if parsed:
+            return parsed
+
+    code2, out2, err2 = run_command('wsl bash -c "netstat -tulnpn 2>/dev/null"')
+    if code2 == 0 and out2.strip():
+        return _parse_wsl_netstat_output(out2)
+
+    return []
+
+
+def kill_wsl_process(pid: int) -> tuple[int, str, str]:
+    """WSL 내부 프로세스를 강제 종료 (kill -9)."""
+    return run_command(f'wsl bash -c "kill -9 {pid}"')
+
+
+# ------------------------------------------------------------------
 # GUI
 # ------------------------------------------------------------------
 class PortForwardApp(tk.Tk):
@@ -394,11 +515,14 @@ class PortForwardApp(tk.Tk):
 
         self.tab_forward = ttk.Frame(self.notebook)
         self.tab_ports = ttk.Frame(self.notebook)
+        self.tab_wsl_ports = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_forward, text="포트 포워딩 관리")
         self.notebook.add(self.tab_ports, text="포트 점유 관리")
+        self.notebook.add(self.tab_wsl_ports, text="WSL 포트 점유 현황")
 
         self._build_forward_tab(self.tab_forward)
         self._build_port_usage_tab(self.tab_ports)
+        self._build_wsl_port_usage_tab(self.tab_wsl_ports)
 
         self.last_mirror_detail = None
         set_command_logger(self.log_command)
@@ -406,6 +530,7 @@ class PortForwardApp(tk.Tk):
         self.refresh_table()
         self.refresh_mirror_status()
         self.refresh_ports()
+        self.refresh_wsl_ports()
 
     # ---------------- 탭 1: 포트 포워딩 관리 ----------------
     def _build_forward_tab(self, parent):
@@ -492,6 +617,115 @@ class PortForwardApp(tk.Tk):
         ttk.Button(bottom, text="선택 프로세스 종료 (taskkill /F)", command=self.kill_selected_process).pack(
             side="left", padx=4
         )
+
+    # ---------------- 탭 3: WSL 포트 점유 현황 ----------------
+    WSL_PORT_COLUMNS = ("proto", "state", "address", "port", "pid", "process")
+    WSL_PORT_HEADERS = ("프로토콜", "상태", "주소", "포트", "PID", "프로세스명")
+
+    def _build_wsl_port_usage_tab(self, parent):
+        top = ttk.Frame(parent, padding=10)
+        top.pack(fill="x")
+
+        ttk.Label(top, text="WSL 내부 LISTEN 포트 목록", font=("맑은 고딕", 13, "bold")).pack(side="left")
+        ttk.Button(top, text="새로고침", command=self.refresh_wsl_ports).pack(side="right", padx=4)
+
+        note = ttk.Label(
+            parent,
+            text="※ wsl ss(또는 netstat)로 조회합니다. 다른 사용자/루트 소유 프로세스는 권한상 이름이 보이지 않을 수 있습니다.",
+            padding=(10, 0, 10, 4),
+            foreground="#666666",
+        )
+        note.pack(fill="x")
+
+        table_frame = ttk.Frame(parent, padding=(10, 0, 10, 10))
+        table_frame.pack(fill="both", expand=True)
+
+        self.wsl_port_tree = ttk.Treeview(
+            table_frame, columns=self.WSL_PORT_COLUMNS, show="headings", selectmode="browse"
+        )
+        for col, header in zip(self.WSL_PORT_COLUMNS, self.WSL_PORT_HEADERS):
+            self.wsl_port_tree.heading(col, text=header)
+            width = 70 if col in ("proto", "state", "port", "pid") else 220
+            self.wsl_port_tree.column(col, width=width, anchor="center")
+        self.wsl_port_tree.pack(side="left", fill="both", expand=True)
+
+        wsl_port_scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=self.wsl_port_tree.yview)
+        self.wsl_port_tree.configure(yscrollcommand=wsl_port_scrollbar.set)
+        wsl_port_scrollbar.pack(side="right", fill="y")
+
+        bottom = ttk.Frame(parent, padding=10)
+        bottom.pack(fill="x")
+        ttk.Button(
+            bottom, text="선택 프로세스 종료 (wsl kill -9)", command=self.kill_selected_wsl_process
+        ).pack(side="left", padx=4)
+
+    def refresh_wsl_ports(self):
+        self.set_status("WSL 포트 점유 조회 중...")
+
+        def worker():
+            return get_wsl_listening_ports()
+
+        def done(ports):
+            for item in self.wsl_port_tree.get_children():
+                self.wsl_port_tree.delete(item)
+
+            if not ports:
+                self.set_status("WSL 포트 조회 결과가 없습니다 (WSL 미실행이거나 ss/netstat을 사용할 수 없습니다)")
+                return
+
+            for p in sorted(ports, key=lambda x: (x["proto"], x["port"])):
+                self.wsl_port_tree.insert(
+                    "", "end",
+                    values=(
+                        p["proto"],
+                        p["state"],
+                        p["address"],
+                        p["port"],
+                        p["pid"] if p["pid"] is not None else "-",
+                        p["process"],
+                    ),
+                )
+            self.set_status(f"WSL LISTEN 포트 {len(ports)}건 조회 완료")
+
+        self.run_bg(worker, on_done=done)
+
+    def kill_selected_wsl_process(self):
+        sel = self.wsl_port_tree.selection()
+        if not sel:
+            messagebox.showinfo("안내", "종료할 프로세스를 목록에서 선택해주세요.")
+            return
+
+        vals = self.wsl_port_tree.item(sel[0], "values")
+        proto, state, address, port, pid, process = vals
+
+        if pid in ("-", "", None):
+            messagebox.showwarning("안내", "PID를 확인할 수 없어 종료할 수 없습니다 (권한 문제일 수 있습니다).")
+            return
+        pid = int(pid)
+
+        if not messagebox.askyesno(
+            "프로세스 종료 확인",
+            f"WSL 내부 포트 {port} ({address})을(를) 사용 중인 프로세스를 종료할까요?\n\n"
+            f"PID: {pid}\n프로세스명: {process}\n\n"
+            f"wsl kill -9 {pid} 명령이 실행됩니다."
+        ):
+            return
+
+        self.set_status(f"WSL PID {pid} 프로세스 종료 중...")
+
+        def worker():
+            return kill_wsl_process(pid)
+
+        def done(result):
+            code, out, err = result
+            self.set_status("준비됨")
+            if code != 0:
+                messagebox.showerror("실패", f"프로세스 종료 실패:\n{err or out}")
+            else:
+                messagebox.showinfo("완료", f"WSL PID {pid} ({process}) 프로세스를 종료했습니다.")
+            self.refresh_wsl_ports()
+
+        self.run_bg(worker, on_done=done)
 
     # ---------------- 공통 ----------------
     def set_status(self, msg: str):
