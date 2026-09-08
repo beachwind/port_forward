@@ -74,8 +74,15 @@ def relaunch_as_admin():
 # ------------------------------------------------------------------
 def run_command(cmd: str) -> tuple[int, str, str]:
     _log_command(cmd)
+    # 주의: ["cmd", "/c", cmd] 리스트 형태로 실행하면 subprocess가 cmd 문자열 전체를
+    # 다시 한번 따옴표로 감싸면서 내부의 "(큰따옴표)를 \"로 이스케이프해버려서
+    # tasklist /FI "PID eq 1234" 같이 따옴표가 포함된 명령어가 콘솔에서 직접 실행할 때와
+    # 다르게 깨져서 전달되는 문제가 있었다. shell=True + 문자열 그대로 실행하면
+    # {COMSPEC} /c "명령어" 형태로만 감싸고 내부 따옴표를 건드리지 않아 cmd 콘솔에서
+    # 직접 타이핑하는 것과 동일하게 동작한다.
     result = subprocess.run(
-        ["cmd", "/c", cmd],
+        cmd,
+        shell=True,
         capture_output=True,
         text=True,
         encoding="cp949",
@@ -362,11 +369,20 @@ class PortForwardApp(tk.Tk):
 
         # 하단 상태바 (두 탭 공통으로 화면 맨 아래 고정)
         self.command_var = tk.StringVar(value="실행된 명령어 없음")
+        self.last_command = ""  # 클립보드 복사용 원본 명령어 문자열 (cmd 콘솔 테스트용)
+
+        command_frame = ttk.Frame(self)
+        command_frame.pack(fill="x", side="bottom")
+
+        ttk.Button(
+            command_frame, text="클립보드에 복사", command=self.copy_command_to_clipboard
+        ).pack(side="right", padx=(4, 6), pady=2)
+
         command_bar = ttk.Label(
-            self, textvariable=self.command_var, relief="sunken", anchor="w",
+            command_frame, textvariable=self.command_var, relief="sunken", anchor="w",
             padding=4, foreground="#0b5394",
         )
-        command_bar.pack(fill="x", side="bottom")
+        command_bar.pack(side="left", fill="x", expand=True)
 
         self.status_var = tk.StringVar(value="준비됨")
         status_bar = ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=4)
@@ -484,7 +500,22 @@ class PortForwardApp(tk.Tk):
 
     def log_command(self, cmd: str):
         """백그라운드 스레드에서도 안전하게 호출 가능. 하단 명령어 상태바를 갱신."""
-        self.after(0, lambda: self.command_var.set(f"실행 명령어: {cmd}"))
+        def update():
+            self.last_command = cmd
+            self.command_var.set(f"실행 명령어: {cmd}")
+        self.after(0, update)
+
+    def copy_command_to_clipboard(self):
+        """하단 바에 표시된 마지막 실행 명령어를 클립보드로 복사 (cmd 콘솔 테스트용)."""
+        cmd = self.last_command
+        if not cmd:
+            messagebox.showinfo("안내", "아직 실행된 명령어가 없습니다.")
+            return
+        self.clipboard_clear()
+        self.clipboard_append(cmd)
+        # 위젯/창이 사라져도 클립보드 내용이 유지되도록 클립보드 소유권을 확정시킴
+        self.update()
+        self.set_status(f"클립보드에 복사됨: {cmd}")
 
     def refresh_table(self):
         """실제 시스템에 등록된 포트 포워딩 목록(netsh)을 조회해서 그리드에 표시.
