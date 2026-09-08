@@ -107,6 +107,135 @@ class ToolTip:
             self.window = None
 
 
+class TransferNotification(tk.Toplevel):
+    """Bottom-right toast notification shown after a file transfer completes.
+
+    Clicking the toast expands it into three action buttons that operate on
+    the transferred file: opening it in Windows Explorer, granting execute
+    permission on the remote (Linux) copy, and running it remotely.
+    """
+
+    DISPLAY_MS = 20000
+    WIDTH = 300
+
+    def __init__(
+        self,
+        master: tk.Widget,
+        message: str,
+        dialog: "FileTransferDialog",
+        local_path: str | None,
+        remote_path: str | None,
+    ):
+        super().__init__(master)
+        self.dialog = dialog
+        self.local_path = local_path
+        self.remote_path = remote_path
+        self.auto_close_id: str | None = None
+
+        self.overrideredirect(True)
+        try:
+            self.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        self.configure(bg="#1a202c")
+
+        self._build_message(message)
+        self._reposition()
+        self._schedule_auto_close()
+
+    def _schedule_auto_close(self) -> None:
+        self.auto_close_id = self.after(self.DISPLAY_MS, self._safe_destroy)
+
+    def _cancel_auto_close(self) -> None:
+        if self.auto_close_id:
+            self.after_cancel(self.auto_close_id)
+            self.auto_close_id = None
+
+    def _clear(self) -> None:
+        for child in self.winfo_children():
+            child.destroy()
+
+    def _build_message(self, message: str) -> None:
+        self._clear()
+        frame = tk.Frame(self, bg="#1a202c", padx=14, pady=12)
+        frame.pack(fill="both", expand=True)
+        label = tk.Label(
+            frame,
+            text=message,
+            bg="#1a202c",
+            fg="#f7fafc",
+            wraplength=260,
+            justify="left",
+            font=("Segoe UI", 10),
+        )
+        label.pack(anchor="w")
+
+        clickable = [frame, label]
+        if self.remote_path:
+            hint = tk.Label(
+                frame,
+                text="클릭하여 작업 선택",
+                bg="#1a202c",
+                fg="#a0aec0",
+                font=("Segoe UI", 8),
+            )
+            hint.pack(anchor="w", pady=(4, 0))
+            clickable.append(hint)
+            for widget in clickable:
+                widget.configure(cursor="hand2")
+                widget.bind("<Button-1>", self._show_actions)
+
+        close_button = tk.Label(self, text="\u2715", bg="#1a202c", fg="#a0aec0", cursor="hand2")
+        close_button.place(x=self.WIDTH - 22, y=6)
+        close_button.bind("<Button-1>", lambda _event: self._safe_destroy())
+
+    def _show_actions(self, _event=None) -> None:
+        self._cancel_auto_close()
+        self._clear()
+        frame = tk.Frame(self, bg="#1a202c", padx=12, pady=10)
+        frame.pack(fill="both", expand=True)
+        name = posixpath.basename(self.remote_path or self.local_path or "")
+        tk.Label(
+            frame, text=name, bg="#1a202c", fg="#f7fafc", font=("Segoe UI", 9, "bold"), wraplength=260, justify="left"
+        ).pack(anchor="w", pady=(0, 6))
+        ttk.Button(frame, text="파일 탐색기", command=self._open_explorer).pack(fill="x", pady=2)
+        ttk.Button(frame, text="실행 권한 주기", command=self._grant_execute).pack(fill="x", pady=2)
+        ttk.Button(frame, text="실행", command=self._execute).pack(fill="x", pady=2)
+        ttk.Button(frame, text="닫기", command=self._safe_destroy).pack(fill="x", pady=(6, 0))
+
+        close_button = tk.Label(self, text="\u2715", bg="#1a202c", fg="#a0aec0", cursor="hand2")
+        close_button.place(x=self.WIDTH - 22, y=6)
+        close_button.bind("<Button-1>", lambda _event: self._safe_destroy())
+        self._reposition()
+
+    def _reposition(self) -> None:
+        self.update_idletasks()
+        height = max(self.winfo_reqheight(), 70)
+        x = self.winfo_screenwidth() - self.WIDTH - 24
+        y = self.winfo_screenheight() - height - 60
+        self.geometry(f"{self.WIDTH}x{height}+{x}+{y}")
+
+    def _open_explorer(self) -> None:
+        if self.local_path:
+            self.dialog.open_transfer_location(self.local_path)
+        self._safe_destroy()
+
+    def _grant_execute(self) -> None:
+        if self.remote_path:
+            self.dialog.grant_remote_execute_permission(self.remote_path)
+        self._safe_destroy()
+
+    def _execute(self) -> None:
+        if self.remote_path:
+            self.dialog.run_remote_executable(self.remote_path)
+        self._safe_destroy()
+
+    def _safe_destroy(self) -> None:
+        self._cancel_auto_close()
+        if self.winfo_exists():
+            self.destroy()
+
+
 class ProfileDialog(tk.Toplevel):
     def __init__(self, master: tk.Tk, profile: dict | None = None, title: str = "로그인 정보"):
         super().__init__(master)
@@ -214,11 +343,10 @@ class ProfileDialog(tk.Toplevel):
 
 
 class FileTransferDialog(tk.Toplevel):
-    def __init__(self, master: tk.Tk, profile: dict, password: str, key_path: str = "", docker_mode: bool = False):
+    def __init__(self, master: tk.Tk, profile: dict, password: str, key_path: str = ""):
         super().__init__(master)
         self.manager = master
-        self.docker_mode = docker_mode
-        self.title(f"{'Docker' if docker_mode else '파일 전송'} - {profile.get('name', profile.get('host', 'server'))}")
+        self.title(f"파일 전송 - {profile.get('name', profile.get('host', 'server'))}")
         self.geometry("1050x620")
         self.minsize(900, 500)
         self.profile = profile
@@ -229,8 +357,6 @@ class FileTransferDialog(tk.Toplevel):
         self.sftp_lock = threading.Lock()
         self.local_cwd = Path.home()
         self.remote_cwd = "."
-        self.docker_container: dict | None = None
-        self.docker_cwd = "/"
         self.drag_data: dict | None = None
         self.favorites = load_favorites()
         self.local_favorite_var = tk.StringVar()
@@ -264,7 +390,6 @@ class FileTransferDialog(tk.Toplevel):
             "folder": ("#d9a441", "folder_plus"),
             "empty": ("#6f93c8", "file_plus"),
             "view": ("#5b6f8f", "eye"),
-            "compare": ("#2b6cb0", "split"),
             "log": ("#4a5568", "lines"),
             "today_log": ("#2b6cb0", "calendar"),
             "log_color": ("#b7791f", "bars"),
@@ -310,11 +435,6 @@ class FileTransferDialog(tk.Toplevel):
             image.put("#ffffff", to=(4, 6, 12, 12))
             image.put(color, to=(5, 8, 7, 10))
             image.put(color, to=(9, 8, 11, 10))
-        elif shape == "split":
-            image.put(color, to=(3, 4, 7, 12))
-            image.put(color, to=(9, 4, 13, 12))
-            image.put("#ffffff", to=(5, 6, 6, 10))
-            image.put("#ffffff", to=(11, 6, 12, 10))
         elif shape == "pen":
             image.put(color, to=(4, 10, 12, 12))
             image.put(color, to=(9, 4, 12, 7))
@@ -429,7 +549,6 @@ class FileTransferDialog(tk.Toplevel):
             ("folder", "새 폴더", self.create_local_folder),
             ("empty", "빈 파일", self.create_local_empty_file),
             ("view", "파일 보기", self.view_local_selected),
-            # ("compare", "비교", self.compare_selected_files),
             ("log", "로그 보기", self.view_local_log),
             ("log_color", "로그 보기(색상)", self.view_local_log_color),
             ("rename", "파일명 변경", self.rename_local_selected),
@@ -448,7 +567,7 @@ class FileTransferDialog(tk.Toplevel):
     def _build_remote_pane(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
         parent.rowconfigure(4, weight=1)
-        ttk.Label(parent, text="Docker 탐색기" if self.docker_mode else "원격 서버 파일 탐색기", font=("Segoe UI", 11, "bold")).grid(
+        ttk.Label(parent, text="원격 서버 파일 탐색기", font=("Segoe UI", 11, "bold")).grid(
             row=0, column=0, sticky="w"
         )
         self.remote_path_var = tk.StringVar()
@@ -459,7 +578,7 @@ class FileTransferDialog(tk.Toplevel):
             favorite_group,
             textvariable=self.remote_favorite_var,
             state="readonly",
-            values=self.sorted_remote_favorites(),
+            values=self._remote_favorites_sorted(),
         )
         self.remote_favorite_combo.grid(row=0, column=0, sticky="ew", padx=(3, 0), pady=3)
         self.remote_favorite_combo.bind("<<ComboboxSelected>>", self.use_remote_favorite)
@@ -479,7 +598,6 @@ class FileTransferDialog(tk.Toplevel):
             ("folder", "새 폴더", self.create_remote_folder),
             ("empty", "빈 파일", self.create_remote_empty_file),
             ("view", "파일 보기", self.view_remote_selected),
-            ("compare", "비교", self.compare_selected_files),
             ("log", "로그 보기", self.view_remote_log),
             ("today_log", "금일 로그 보기", self.view_today_remote_log),
             ("log_color", "로그 보기(색상)", self.view_remote_log_color),
@@ -490,14 +608,6 @@ class FileTransferDialog(tk.Toplevel):
             ("clipboard", "클립보드 보기", self.view_remote_clipboard),
             ("screenshot", "스크린샷", self.capture_remote_screenshot),
         ]
-        if self.docker_mode:
-            remote_actions.extend(
-                [
-                    ("delete", "Docker 컨테이너 중지", self.stop_selected_docker_container),
-                    ("terminal", "Docker 컨테이너 빌드", self.build_selected_docker_container),
-                    ("go", "Docker 컨테이너 run", self.run_selected_docker_container),
-                ]
-            )
         for column, (icon, tooltip, command) in enumerate(remote_actions):
             self._icon_button(action_group, icon, tooltip, command, 0, column)
 
@@ -562,17 +672,12 @@ class FileTransferDialog(tk.Toplevel):
             menu.add_command(label="새 폴더", command=self.create_remote_folder)
             menu.add_command(label="빈 파일", command=self.create_remote_empty_file)
             menu.add_cascade(label="파일 보기", menu=view_menu)
-            menu.add_command(label="편집", command=self.edit_remote_with_gvim)
             menu.add_command(label="비교", command=self.compare_selected_files)
+            menu.add_command(label="편집", command=self.edit_remote_with_gvim)
             menu.add_command(label="로그 보기", command=self.view_remote_log)
             menu.add_command(label="로그 보기(색상)", command=self.view_remote_log_color)
             menu.add_command(label="파일명 변경", command=self.rename_remote_selected)
             menu.add_command(label="삭제", command=self.delete_remote_selected)
-            if self.docker_mode:
-                menu.add_separator()
-                menu.add_command(label="Docker 컨테이너 중지", command=self.stop_selected_docker_container)
-                menu.add_command(label="Docker 컨테이너 빌드", command=self.build_selected_docker_container)
-                menu.add_command(label="Docker 컨테이너 run", command=self.run_selected_docker_container)
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -667,9 +772,6 @@ class FileTransferDialog(tk.Toplevel):
     def refresh_remote(self) -> None:
         if not self.sftp:
             return
-        if self.docker_mode:
-            self.refresh_docker_remote()
-            return
         tree = self._tree_widget(self.remote_tree)
         tree.delete(*tree.get_children())
         self.remote_path_var.set(self.remote_cwd)
@@ -705,97 +807,6 @@ class FileTransferDialog(tk.Toplevel):
                 values=("폴더" if is_dir else "파일", human_size(size), format_mtime(modified)),
             )
         self.status.set("탐색기 준비 완료. 파일을 반대쪽 목록으로 드래그하세요.")
-
-    def refresh_docker_remote(self) -> None:
-        tree = self._tree_widget(self.remote_tree)
-        tree.delete(*tree.get_children())
-        if not self.docker_container:
-            self.remote_path_var.set("Docker containers")
-            threading.Thread(target=self._load_docker_containers, daemon=True).start()
-            return
-        self.remote_path_var.set(f"[Docker:{self.docker_container['name']}] {self.docker_cwd}")
-        if self.docker_cwd != "/":
-            tree.insert("", "end", iid="docker:..", text="..", image=self.folder_icon, values=("폴더", "", ""))
-        threading.Thread(target=self._load_docker_path, daemon=True).start()
-
-    def _remote_exec(self, command: str, get_pty: bool = False) -> tuple[int, str, str]:
-        stdin, stdout, stderr = self.client.exec_command(command, get_pty=get_pty)
-        stdin.close()
-        out = stdout.read().decode("utf-8", errors="replace")
-        err = stderr.read().decode("utf-8", errors="replace")
-        return stdout.channel.recv_exit_status(), out, err
-
-    def _load_docker_containers(self) -> None:
-        try:
-            code, out, err = self._remote_exec("docker ps --format '{{.ID}}\\t{{.Image}}\\t{{.Names}}\\t{{.Status}}'")
-            if code != 0:
-                raise RuntimeError(err.strip() or f"docker ps 종료 코드: {code}")
-            rows = []
-            for line in out.splitlines():
-                parts = line.split("\t")
-                if len(parts) < 4:
-                    continue
-                container_id, image, name, status_text = parts[:4]
-                rows.append((container_id, image, name, status_text))
-            self.after(0, lambda: self._fill_docker_containers(rows))
-        except Exception as exc:
-            detail = str(exc)
-            self.after(0, lambda: self.status.set(f"Docker 목록을 읽을 수 없습니다: {detail}"))
-
-    def _fill_docker_containers(self, rows: list[tuple[str, str, str, str]]) -> None:
-        tree = self._tree_widget(self.remote_tree)
-        tree.delete(*tree.get_children())
-        for container_id, image, name, status_text in rows:
-            tree.insert(
-                "",
-                "end",
-                iid=f"docker_container:{container_id}",
-                text=f"[Docker:{name}]",
-                image=self.folder_icon,
-                values=("컨테이너", image, status_text),
-            )
-        self.status.set("Docker 컨테이너 목록을 표시했습니다. 컨테이너를 더블클릭하면 내부 파일을 봅니다.")
-
-    def _load_docker_path(self) -> None:
-        container_id = self.docker_container["id"]
-        list_script = (
-            f"cd {shlex.quote(self.docker_cwd)} && "
-            "for f in .* *; do "
-            "[ \"$f\" = \".\" ] || [ \"$f\" = \"..\" ] && continue; "
-            "[ -e \"$f\" ] || continue; "
-            "if [ -d \"$f\" ]; then printf 'D\\t%s\\t0\\n' \"$f\"; "
-            "else printf 'F\\t%s\\t%s\\n' \"$f\" \"$(wc -c < \"$f\" 2>/dev/null || echo 0)\"; fi; "
-            "done"
-        )
-        try:
-            code, out, err = self._remote_exec(f"docker exec {shlex.quote(container_id)} /bin/sh -lc {shlex.quote(list_script)}")
-            if code != 0:
-                raise RuntimeError(err.strip() or f"docker exec 종료 코드: {code}")
-            rows = []
-            for line in out.splitlines():
-                kind, name, size_text = (line.split("\t") + ["", "", ""])[:3]
-                if not name:
-                    continue
-                is_dir = kind == "D"
-                size = None if is_dir else int(size_text.strip() or "0")
-                rows.append((posixpath.join(self.docker_cwd, name), name, is_dir, size))
-            self.after(0, lambda: self._fill_docker_path(rows))
-        except Exception as exc:
-            detail = str(exc)
-            self.after(0, lambda: self.status.set(f"Docker 경로를 읽을 수 없습니다: {detail}"))
-
-    def _fill_docker_path(self, rows: list[tuple[str, str, bool, int | None]]) -> None:
-        tree = self._tree_widget(self.remote_tree)
-        for path, name, is_dir, size in sorted(rows, key=lambda row: (not row[2], row[1].lower())):
-            tree.insert(
-                "",
-                "end",
-                iid=f"docker:{path}",
-                text=name,
-                image=self.folder_icon if is_dir else self.file_icon,
-                values=("폴더" if is_dir else "파일", human_size(size), ""),
-            )
-        self.status.set(f"Docker 컨테이너 내부 경로 표시: {self.docker_cwd}")
 
     def goto_local_path(self) -> None:
         target = Path(self.local_path_var.get()).expanduser()
@@ -840,22 +851,25 @@ class FileTransferDialog(tk.Toplevel):
             values.sort(key=str.lower)
             save_favorites(self.favorites)
         self.local_favorite_combo.configure(values=self.favorites.get("local_paths", []))
-        self.remote_favorite_combo.configure(values=self.sorted_remote_favorites())
+        self.remote_favorite_combo.configure(values=self._remote_favorites_sorted())
 
-    def sorted_remote_favorites(self) -> list[str]:
-        username = str(self.profile.get("username", "")).strip().strip("/")
-        own_home = f"/home/{username}/" if username else ""
-        own_home_root = f"/home/{username}" if username else ""
+    def _remote_favorites_sorted(self) -> list[str]:
+        """Sort remote favorite paths so the connected account's home comes
+        first and other accounts' /home/[user] paths are pushed to the back.
+        """
+        paths = list(self.favorites.get("remote_paths", []))
+        username = self.profile.get("username", "")
+        own_home = f"/home/{username}"
 
         def sort_key(path: str) -> tuple[int, str]:
-            normalized = path.replace("\\", "/").rstrip("/")
-            if username and (normalized == own_home_root or normalized.startswith(own_home)):
-                return 0, normalized.lower()
-            if normalized.startswith("/home/"):
-                return 1, normalized.lower()
-            return 2, normalized.lower()
+            normalized = path.rstrip("/") or "/"
+            if username and (normalized == own_home or normalized.startswith(own_home + "/")):
+                return (0, path.lower())
+            if normalized == "/home" or normalized.startswith("/home/"):
+                return (2, path.lower())
+            return (1, path.lower())
 
-        return sorted(self.favorites.get("remote_paths", []), key=sort_key)
+        return sorted(paths, key=sort_key)
 
     def open_windows_explorer(self) -> None:
         try:
@@ -1057,10 +1071,8 @@ class FileTransferDialog(tk.Toplevel):
         if not selected:
             return None
         item = selected[0]
-        if item in {"remote:..", "docker:.."} or item.startswith("docker_container:"):
+        if item == "remote:..":
             return None
-        if self.docker_mode and item.startswith("docker:"):
-            return item.removeprefix("docker:"), tree.set(item, "type") == "폴더"
         return item.removeprefix("remote:"), tree.set(item, "type") == "폴더"
 
     def delete_remote_selected(self) -> None:
@@ -1136,45 +1148,6 @@ class FileTransferDialog(tk.Toplevel):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def compare_selected_files(self) -> None:
-        local_path = self.selected_local_path()
-        remote_selected = self.selected_remote_item()
-        if not local_path or not remote_selected:
-            messagebox.showinfo("선택 필요", "로컬 파일과 원격 파일을 각각 하나씩 선택하세요.", parent=self)
-            return
-        remote_path, is_dir = remote_selected
-        if local_path.is_dir() or is_dir:
-            messagebox.showinfo("비교", "폴더는 비교할 수 없습니다. 파일을 선택하세요.", parent=self)
-            return
-        bash_path = Path(r"C:\Util\cygwin\bin\bash.exe")
-        if not bash_path.exists():
-            messagebox.showerror("비교 실패", f"Cygwin bash 실행 파일을 찾을 수 없습니다.\n{bash_path}", parent=self)
-            return
-        temp_dir = Path(tempfile.gettempdir()) / "CommandManager" / "remote_compare" / self.profile["id"]
-        remote_local_path = temp_dir / posixpath.basename(remote_path)
-        self.status.set("비교할 원격 파일을 내려받는 중...")
-
-        def worker() -> None:
-            try:
-                temp_dir.mkdir(parents=True, exist_ok=True)
-                if self.docker_mode and self.docker_container:
-                    self._docker_copy_to_remote_temp(remote_path, str(remote_local_path))
-                else:
-                    with self.sftp_lock:
-                        self.sftp.get(remote_path, str(remote_local_path))
-                diff_command = (
-                    "vimdiff -- "
-                    f"{shell_quote(cygwin_path(str(local_path)))} "
-                    f"{shell_quote(cygwin_path(str(remote_local_path)))}"
-                )
-                self.after(0, lambda: self.status.set("vimdiff 비교 창을 열었습니다."))
-                subprocess.Popen([str(bash_path), "--login", "-lc", diff_command], creationflags=subprocess.CREATE_NEW_CONSOLE)
-            except Exception as exc:
-                detail = str(exc)
-                self.after(0, lambda: messagebox.showerror("비교 실패", f"파일 비교를 실행할 수 없습니다.\n{detail}", parent=self))
-
-        threading.Thread(target=worker, daemon=True).start()
-
     def edit_remote_with_gvim(self) -> None:
         selected = self.selected_remote_item()
         if not selected:
@@ -1186,8 +1159,13 @@ class FileTransferDialog(tk.Toplevel):
             return
         bash_path = Path(r"C:\Util\cygwin\bin\bash.exe")
         if not bash_path.exists():
-            messagebox.showerror("편집 실패", f"Cygwin bash 실행 파일을 찾을 수 없습니다.\n{bash_path}", parent=self)
+            messagebox.showerror(
+                "편집 실패",
+                f"Cygwin bash 실행 파일을 찾을 수 없습니다.\n{bash_path}",
+                parent=self,
+            )
             return
+
         temp_dir = Path(tempfile.gettempdir()) / "CommandManager" / "remote_edit" / self.profile["id"]
         local_path = temp_dir / posixpath.basename(remote_path)
         self.status.set("원격 파일을 편집용으로 내려받는 중...")
@@ -1195,30 +1173,36 @@ class FileTransferDialog(tk.Toplevel):
         def worker() -> None:
             try:
                 temp_dir.mkdir(parents=True, exist_ok=True)
-                if self.docker_mode and self.docker_container:
-                    self._docker_copy_to_remote_temp(remote_path, str(local_path))
-                else:
-                    with self.sftp_lock:
-                        self.sftp.get(remote_path, str(local_path))
-                before = local_path.stat()
-                before_signature = (before.st_mtime_ns, before.st_size)
-                vim_command = f"vim -- {shell_quote(cygwin_path(str(local_path)))}"
+                with self.sftp_lock:
+                    remote_size = max(1, self.sftp.stat(remote_path).st_size)
+
+                def download_callback(transferred: int, _total: int) -> None:
+                    percent = min(100, int((transferred / remote_size) * 100))
+                    self.after(0, lambda value=percent: self.status.set(f"원격 파일을 편집용으로 내려받는 중... ({value}%)"))
+
+                with self.sftp_lock:
+                    self.sftp.get(remote_path, str(local_path), callback=download_callback)
+                before_stat = local_path.stat()
+                before_signature = (before_stat.st_mtime_ns, before_stat.st_size)
                 self.after(0, lambda: self.status.set("vim 편집 중... 저장 후 터미널 창을 닫으면 원격에 업로드합니다."))
-                process = subprocess.Popen([str(bash_path), "--login", "-lc", vim_command], creationflags=subprocess.CREATE_NEW_CONSOLE)
-                process.wait()
+                vim_command = f"vim -- {shell_quote(cygwin_path(str(local_path)))}"
+                process = subprocess.Popen(
+                    [str(bash_path), "--login", "-lc", vim_command],
+                    creationflags=subprocess.CREATE_NEW_CONSOLE,
+                )
+                exit_code = process.wait()
+                self.after(0, lambda code=exit_code: self.status.set(f"vim 종료 감지됨. 변경 사항 확인 중... (종료 코드 {code})"))
                 if not local_path.exists():
                     self.after(0, lambda: self.status.set("편집 파일이 삭제되어 업로드하지 않았습니다."))
                     return
-                after = local_path.stat()
-                if (after.st_mtime_ns, after.st_size) == before_signature:
+                after_stat = local_path.stat()
+                after_signature = (after_stat.st_mtime_ns, after_stat.st_size)
+                if after_signature == before_signature:
                     self.after(0, lambda: self.status.set("변경 사항이 없어 업로드하지 않았습니다."))
                     return
                 self.after(0, lambda: self.status.set("수정된 파일을 원격 서버에 업로드하는 중..."))
-                if self.docker_mode and self.docker_container:
-                    self._docker_copy_local_to_container(str(local_path), remote_path)
-                else:
-                    with self.sftp_lock:
-                        self.sftp.put(str(local_path), remote_path)
+                with self.sftp_lock:
+                    self.sftp.put(str(local_path), remote_path)
             except Exception as exc:
                 detail = str(exc)
                 self.after(0, lambda: messagebox.showerror("편집 실패", f"원격 파일 편집/업로드 중 오류가 발생했습니다.\n{detail}", parent=self))
@@ -1227,6 +1211,67 @@ class FileTransferDialog(tk.Toplevel):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def compare_selected_files(self) -> None:
+        local_path = self.selected_local_path()
+        if not local_path or local_path.is_dir():
+            messagebox.showinfo("파일 비교", "로컬 파일 탐색기에서 비교할 파일 하나를 선택하세요.", parent=self)
+            return
+        remote_selected = self.selected_remote_item()
+        if not remote_selected or remote_selected[1]:
+            messagebox.showinfo("파일 비교", "원격 파일 탐색기에서 비교할 파일 하나를 선택하세요.", parent=self)
+            return
+        remote_path, _is_dir = remote_selected
+
+        bash_path = Path(r"C:\Util\cygwin\bin\bash.exe")
+        if not bash_path.exists():
+            messagebox.showerror(
+                "비교 실패",
+                f"Cygwin bash 실행 파일을 찾을 수 없습니다.\n{bash_path}",
+                parent=self,
+            )
+            return
+
+        temp_dir = Path(tempfile.gettempdir()) / "CommandManager" / "remote_compare" / self.profile["id"]
+        remote_local_copy = temp_dir / posixpath.basename(remote_path)
+        self.status.set("원격 파일을 비교용으로 내려받는 중...")
+
+        def worker() -> None:
+            try:
+                temp_dir.mkdir(parents=True, exist_ok=True)
+                with self.sftp_lock:
+                    self.sftp.get(remote_path, str(remote_local_copy))
+            except Exception as exc:
+                detail = str(exc)
+                self.after(
+                    0,
+                    lambda: messagebox.showerror("비교 실패", f"원격 파일을 내려받을 수 없습니다.\n{detail}", parent=self),
+                )
+                return
+            self.after(0, lambda: self._launch_vimdiff(bash_path, local_path, remote_local_copy))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _launch_vimdiff(self, bash_path: Path, local_path: Path, remote_local_copy: Path) -> None:
+        vimdiff_command = (
+            f"vimdiff -- {shell_quote(cygwin_path(str(local_path)))} "
+            f"{shell_quote(cygwin_path(str(remote_local_copy)))}"
+        )
+        try:
+            subprocess.Popen(
+                [str(bash_path), "--login", "-lc", vimdiff_command],
+                creationflags=subprocess.CREATE_NEW_CONSOLE,
+            )
+        except Exception as exc:
+            messagebox.showerror("비교 실패", f"vimdiff를 실행할 수 없습니다.\n{exc}", parent=self)
+            return
+        self.status.set(f"{local_path.name} \u2194 {remote_local_copy.name} vimdiff 비교 창을 열었습니다.")
+
+    def view_remote_log(self) -> None:
+        self._view_remote_log(color=False)
+
+    def view_remote_log_color(self) -> None:
+        self._view_remote_log(color=True)
+
     def view_today_remote_log(self) -> None:
         selected = self.today_remote_log_item()
         if not selected:
@@ -1234,19 +1279,18 @@ class FileTransferDialog(tk.Toplevel):
             return
         self.open_remote_log(selected[0], color=False)
 
-    def today_remote_log_item(self) -> tuple[str, bool] | None:
-        if self.docker_mode:
-            return None
-        today_name = datetime.now().strftime("%Y-%m-%d.log")
-        remote_path = posixpath.join(self.remote_cwd, today_name)
-        try:
-            with self.sftp_lock:
-                attrs = self.sftp.stat(remote_path)
-        except Exception:
-            return None
-        if stat.S_ISDIR(attrs.st_mode):
-            return None
-        return remote_path, False
+    def _view_remote_log(self, color: bool) -> None:
+        selected = self.selected_remote_item()
+        if not selected:
+            selected = self.today_remote_log_item()
+            if not selected:
+                messagebox.showinfo("선택 필요", "로그를 볼 원격 파일을 선택하세요.", parent=self)
+                return
+        remote_path, is_dir = selected
+        if is_dir:
+            messagebox.showinfo("로그 보기", "폴더는 로그 보기로 열 수 없습니다.", parent=self)
+            return
+        self.open_remote_log(remote_path, color=color)
 
     def open_remote_log(self, remote_path: str, color: bool = False) -> None:
         stop_event, run_event, append_text = self.show_log_viewer(remote_path, color=color)
@@ -1271,6 +1315,10 @@ class FileTransferDialog(tk.Toplevel):
                         break
                     else:
                         time.sleep(0.2)
+                if not stop_event.is_set() and stderr.channel.recv_stderr_ready():
+                    error_data = stderr.read().decode("utf-8", errors="replace")
+                    if error_data:
+                        append_text(f"\n{error_data}\n")
             except Exception as exc:
                 append_text(f"\n[로그 보기 종료: {exc}]\n")
             finally:
@@ -1279,24 +1327,19 @@ class FileTransferDialog(tk.Toplevel):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def view_remote_log(self) -> None:
-        self._view_remote_log(color=False)
-
-    def view_remote_log_color(self) -> None:
-        self._view_remote_log(color=True)
-
-    def _view_remote_log(self, color: bool) -> None:
-        selected = self.selected_remote_item()
-        if not selected:
-            selected = self.today_remote_log_item()
-            if not selected:
-                messagebox.showinfo("선택 필요", "로그를 볼 원격 파일을 선택하세요.", parent=self)
-                return
-        remote_path, is_dir = selected
-        if is_dir:
-            messagebox.showinfo("로그 보기", "폴더는 로그 보기로 열 수 없습니다.", parent=self)
-            return
-        self.open_remote_log(remote_path, color=color)
+    def today_remote_log_item(self) -> tuple[str, bool] | None:
+        if not self.sftp:
+            return None
+        today_name = datetime.now().strftime("%Y-%m-%d.log")
+        remote_path = posixpath.join(self.remote_cwd, today_name)
+        try:
+            with self.sftp_lock:
+                attrs = self.sftp.stat(remote_path)
+        except Exception:
+            return None
+        if stat.S_ISDIR(attrs.st_mode):
+            return None
+        return remote_path, False
 
     def rename_remote_selected(self) -> None:
         selected = self.selected_remote_item()
@@ -1654,24 +1697,6 @@ class FileTransferDialog(tk.Toplevel):
             if not selected:
                 return
             item = selected[0]
-        if self.docker_mode:
-            if item == "docker:..":
-                parent = posixpath.dirname(self.docker_cwd.rstrip("/")) or "/"
-                self.docker_cwd = parent
-                self.refresh_remote()
-                return
-            if item.startswith("docker_container:"):
-                container_id = item.removeprefix("docker_container:")
-                name = tree.item(item, "text").removeprefix("[Docker:").removesuffix("]")
-                image = tree.set(item, "size")
-                self.docker_container = {"id": container_id, "name": name, "image": image}
-                self.docker_cwd = "/"
-                self.refresh_remote()
-                return
-            if item.startswith("docker:") and tree.set(item, "type") == "폴더":
-                self.docker_cwd = item.removeprefix("docker:")
-                self.refresh_remote()
-                return
         if item == "remote:..":
             parent = posixpath.dirname(self.remote_cwd.rstrip("/")) or "/"
             self._set_remote_cwd(parent)
@@ -1700,24 +1725,18 @@ class FileTransferDialog(tk.Toplevel):
     def start_drag(self, event, source: str) -> None:
         tree = event.widget
         item = tree.identify_row(event.y)
-        if not item or item.endswith(":.."):
-            self.drag_data = None
-            return
-        if not (self.docker_mode and source == "remote") and tree.set(item, "type") != "파일":
+        if not item or item.endswith(":..") or tree.set(item, "type") != "파일":
             self.drag_data = None
             return
         selected = list(tree.selection())
         if item not in selected:
             tree.selection_set(item)
             selected = [item]
-        file_items = []
-        for selected_item in selected:
-            if selected_item.endswith(":.."):
-                continue
-            if self.docker_mode and source == "remote":
-                file_items.append(selected_item)
-            elif tree.set(selected_item, "type") == "파일":
-                file_items.append(selected_item)
+        file_items = [
+            selected_item
+            for selected_item in selected
+            if not selected_item.endswith(":..") and tree.set(selected_item, "type") == "파일"
+        ]
         self.drag_data = {"source": source, "items": file_items}
 
     def finish_drag(self, event) -> None:
@@ -1728,10 +1747,6 @@ class FileTransferDialog(tk.Toplevel):
         remote_tree = self._tree_widget(self.remote_tree)
         target_tree = self._drop_tree_at_pointer(event.x_root, event.y_root)
         if source == "local" and target_tree == remote_tree:
-            if self.docker_mode:
-                self.confirm_docker_uploads(self.drag_data["items"], self._drop_docker_folder(remote_tree, event.x_root, event.y_root))
-                self.drag_data = None
-                return
             remote_folder = self._drop_remote_folder(remote_tree, event.x_root, event.y_root) or self.remote_cwd
             transfers = []
             for item in self.drag_data["items"]:
@@ -1740,10 +1755,6 @@ class FileTransferDialog(tk.Toplevel):
                 transfers.append((local_path, remote_path))
             self.confirm_transfers("upload", transfers)
         elif source == "remote" and target_tree == local_tree:
-            if self.docker_mode:
-                self.confirm_docker_downloads(self.drag_data["items"], self._drop_local_folder(local_tree, event.x_root, event.y_root) or self.local_cwd)
-                self.drag_data = None
-                return
             local_folder = self._drop_local_folder(local_tree, event.x_root, event.y_root) or self.local_cwd
             transfers = []
             for item in self.drag_data["items"]:
@@ -1781,180 +1792,7 @@ class FileTransferDialog(tk.Toplevel):
         row = tree.identify_row(y_root - tree.winfo_rooty())
         if not row or row == "remote:.." or tree.set(row, "type") != "폴더":
             return None
-        if self.docker_mode and row.startswith("docker:"):
-            return row.removeprefix("docker:")
         return row.removeprefix("remote:")
-
-    def _drop_docker_folder(self, tree: ttk.Treeview, x_root: int, y_root: int) -> str:
-        row = tree.identify_row(y_root - tree.winfo_rooty())
-        if row and row.startswith("docker:") and tree.set(row, "type") == "폴더":
-            return row.removeprefix("docker:")
-        return self.docker_cwd
-
-    def _docker_copy_to_remote_temp(self, docker_path: str, local_path: str) -> None:
-        if not self.docker_container:
-            raise RuntimeError("Docker 컨테이너가 선택되지 않았습니다.")
-        temp_remote = f"/tmp/command_manager_{int(time.time() * 1000)}_{posixpath.basename(docker_path)}"
-        code, _out, err = self._remote_exec(
-            f"docker cp {shlex.quote(self.docker_container['id'] + ':' + docker_path)} {shlex.quote(temp_remote)}"
-        )
-        if code != 0:
-            raise RuntimeError(err.strip() or "docker cp 다운로드 준비 실패")
-        try:
-            with self.sftp_lock:
-                self._download_remote_path_recursive(temp_remote, Path(local_path))
-        finally:
-            self._remote_exec(f"rm -rf -- {shlex.quote(temp_remote)}")
-
-    def _download_remote_path_recursive(self, remote_path: str, local_path: Path) -> None:
-        attrs = self.sftp.stat(remote_path)
-        if stat.S_ISDIR(attrs.st_mode):
-            local_path.mkdir(parents=True, exist_ok=True)
-            for item in self.sftp.listdir_attr(remote_path):
-                self._download_remote_path_recursive(
-                    posixpath.join(remote_path, item.filename),
-                    local_path / item.filename,
-                )
-            return
-        local_path.parent.mkdir(parents=True, exist_ok=True)
-        self.sftp.get(remote_path, str(local_path))
-
-    def _docker_copy_local_to_container(self, local_path: str, docker_path: str) -> None:
-        if not self.docker_container:
-            raise RuntimeError("Docker 컨테이너가 선택되지 않았습니다.")
-        temp_remote = f"/tmp/command_manager_upload_{int(time.time() * 1000)}_{Path(local_path).name}"
-        try:
-            with self.sftp_lock:
-                self.sftp.put(local_path, temp_remote)
-            code, _out, err = self._remote_exec(
-                f"docker cp {shlex.quote(temp_remote)} {shlex.quote(self.docker_container['id'] + ':' + docker_path)}"
-            )
-            if code != 0:
-                raise RuntimeError(err.strip() or "docker cp 업로드 실패")
-        finally:
-            self._remote_exec(f"rm -f -- {shlex.quote(temp_remote)}")
-
-    def confirm_docker_downloads(self, items: list[str], local_folder: Path) -> None:
-        if not self.docker_container:
-            messagebox.showinfo("선택 필요", "Docker 컨테이너를 선택하세요.", parent=self)
-            return
-        docker_paths = []
-        for item in items:
-            if item.startswith("docker_container:"):
-                docker_paths.append("/")
-            elif item.startswith("docker:"):
-                docker_paths.append(item.removeprefix("docker:"))
-        if not docker_paths:
-            return
-        if not messagebox.askyesno("Docker 다운로드", f"선택한 Docker 항목 {len(docker_paths)}개를 다운로드할까요?", parent=self):
-            return
-
-        def worker() -> None:
-            try:
-                for index, docker_path in enumerate(docker_paths, start=1):
-                    name = self.docker_container["name"] if docker_path == "/" else posixpath.basename(docker_path)
-                    self.after(0, lambda i=index: self.status.set(f"Docker 항목 다운로드 중... ({i}/{len(docker_paths)})"))
-                    self._docker_copy_to_remote_temp(docker_path, str(local_folder / name))
-            except Exception as exc:
-                detail = str(exc)
-                self.after(0, lambda: messagebox.showerror("Docker 다운로드 실패", detail, parent=self))
-                return
-            self.after(0, lambda: (self.refresh_local(), self.status.set("Docker 항목 다운로드 완료.")))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def confirm_docker_uploads(self, items: list[str], docker_folder: str) -> None:
-        if not self.docker_container:
-            messagebox.showinfo("선택 필요", "업로드할 Docker 컨테이너를 먼저 더블클릭하세요.", parent=self)
-            return
-        local_paths = [Path(item.removeprefix("local:")) for item in items if item.startswith("local:")]
-        local_paths = [path for path in local_paths if path.is_file()]
-        if not local_paths:
-            return
-        if not messagebox.askyesno("Docker 업로드", f"선택한 로컬 파일 {len(local_paths)}개를 Docker 컨테이너에 업로드할까요?", parent=self):
-            return
-
-        def worker() -> None:
-            try:
-                for index, local_path in enumerate(local_paths, start=1):
-                    self.after(0, lambda i=index: self.status.set(f"Docker 컨테이너 소스 업데이트 중... ({i}/{len(local_paths)})"))
-                    self._docker_copy_local_to_container(str(local_path), posixpath.join(docker_folder, local_path.name))
-            except Exception as exc:
-                detail = str(exc)
-                self.after(0, lambda: messagebox.showerror("Docker 업로드 실패", detail, parent=self))
-                return
-            self.after(0, lambda: (self.refresh_remote(), self.status.set("Docker 컨테이너 소스 업데이트 완료.")))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def selected_docker_container(self) -> dict | None:
-        if not self.docker_mode:
-            return None
-        tree = self._tree_widget(self.remote_tree)
-        selected = tree.selection()
-        if selected and selected[0].startswith("docker_container:"):
-            item = selected[0]
-            return {
-                "id": item.removeprefix("docker_container:"),
-                "name": tree.item(item, "text").removeprefix("[Docker:").removesuffix("]"),
-                "image": tree.set(item, "size"),
-            }
-        return self.docker_container
-
-    def stop_selected_docker_container(self) -> None:
-        container = self.selected_docker_container()
-        if not container:
-            messagebox.showinfo("선택 필요", "Docker 컨테이너를 선택하세요.", parent=self)
-            return
-        if not messagebox.askyesno("Docker 컨테이너 중지", f"{container['name']} 컨테이너를 중지할까요?", parent=self):
-            return
-        self._run_docker_host_command(
-            f"docker stop {shlex.quote(container['id'])}",
-            "Docker 컨테이너를 중지했습니다.",
-        )
-
-    def build_selected_docker_container(self) -> None:
-        container = self.selected_docker_container()
-        default_image = container.get("image", "") if container else ""
-        image = simpledialog.askstring("Docker 컨테이너 빌드", "빌드할 이미지 태그를 입력하세요.", initialvalue=default_image, parent=self)
-        if not image:
-            return
-        context = simpledialog.askstring("Docker 컨테이너 빌드", "원격 서버의 build context 경로를 입력하세요.", initialvalue=self.remote_cwd if self.remote_cwd != "." else "~", parent=self)
-        if not context:
-            return
-        self._run_docker_host_command(
-            f"cd {shlex.quote(context)} && docker build -t {shlex.quote(image)} .",
-            "Docker 이미지 빌드를 시작했습니다.",
-        )
-
-    def run_selected_docker_container(self) -> None:
-        container = self.selected_docker_container()
-        default_image = container.get("image", "") if container else ""
-        command = simpledialog.askstring(
-            "Docker 컨테이너 run",
-            "실행할 docker run 명령을 입력하세요.",
-            initialvalue=f"docker run -d {default_image}".strip(),
-            parent=self,
-        )
-        if not command:
-            return
-        self._run_docker_host_command(command, "Docker run 명령을 실행했습니다.")
-
-    def _run_docker_host_command(self, command: str, success_message: str) -> None:
-        self.status.set("Docker 명령 실행 중...")
-
-        def worker() -> None:
-            try:
-                code, out, err = self._remote_exec(command, get_pty=True)
-                if code != 0:
-                    raise RuntimeError(err.strip() or out.strip() or f"Docker 명령 종료 코드: {code}")
-            except Exception as exc:
-                detail = str(exc)
-                self.after(0, lambda: messagebox.showerror("Docker 명령 실패", detail, parent=self))
-                return
-            self.after(0, lambda: (self.refresh_remote(), self.status.set(success_message)))
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def move_local_files_to_folder(self, target_folder: Path) -> None:
         if not self.drag_data:
@@ -2064,83 +1902,112 @@ class FileTransferDialog(tk.Toplevel):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _transfer_done(self, success: bool, verb: str, detail: str, mode: str = "", transfers: list[tuple[str, str]] | None = None) -> None:
+    def _transfer_done(
+        self,
+        success: bool,
+        verb: str,
+        detail: str,
+        mode: str = "",
+        transfers: list[tuple[str, str]] | None = None,
+    ) -> None:
         if success:
             self.progress_var.set(100)
             self.progress_text_var.set("100%")
             self.status.set(f"파일 {verb} 완료. (100%)")
             self.refresh_all()
             if transfers:
-                self.show_transfer_notification(mode, transfers)
+                self._show_transfer_notification(mode, transfers)
         else:
             self.progress_var.set(0)
             self.progress_text_var.set("0%")
             self.status.set(f"파일 {verb} 실패: {detail}")
             messagebox.showerror("전송 실패", f"파일 {verb}에 실패했습니다.\n{detail}", parent=self)
 
-    def show_transfer_notification(self, mode: str, transfers: list[tuple[str, str]]) -> None:
-        target_local, target_remote = transfers[-1]
-        verb = "업로드" if mode == "upload" else "다운로드"
-        target_name = Path(target_local).name if mode == "download" else posixpath.basename(target_remote)
-        popup = tk.Toplevel(self)
-        popup.title("파일 전송 완료")
-        popup.resizable(False, False)
-        popup.attributes("-topmost", True)
-        popup.after(20000, lambda: popup.winfo_exists() and popup.destroy())
-        frame = ttk.Frame(popup, padding=12)
-        frame.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(frame, text=f"파일 {verb} 완료", font=("Segoe UI", 10, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(frame, text=target_name).grid(row=1, column=0, sticky="w", pady=(4, 0))
-        actions = ttk.Frame(frame)
-        actions.grid(row=2, column=0, sticky="ew", pady=(10, 0))
-        actions.grid_remove()
-        ttk.Button(actions, text="파일 탐색기", command=lambda: self.open_transfer_target(mode, target_local, target_remote)).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(actions, text="실행 권한 주기", command=lambda: self.grant_transfer_execute_permission(mode, target_local, target_remote)).grid(row=0, column=1, padx=(0, 6))
-        ttk.Button(actions, text="실행", command=lambda: self.run_transfer_target(mode, target_local, target_remote)).grid(row=0, column=2)
+    def open_transfer_location(self, local_path: str) -> None:
+        try:
+            subprocess.Popen(["explorer.exe", f"/select,{local_path}"])
+        except Exception as exc:
+            messagebox.showerror("탐색기 실행 실패", f"Windows 탐색기를 열 수 없습니다.\n{exc}", parent=self)
 
-        def reveal(_event=None) -> None:
-            actions.grid()
-
-        popup.bind("<Button-1>", reveal)
-        frame.bind("<Button-1>", reveal)
-        for child in frame.winfo_children():
-            child.bind("<Button-1>", reveal)
-        popup.update_idletasks()
-        x = max(0, popup.winfo_screenwidth() - popup.winfo_width() - 24)
-        y = max(0, popup.winfo_screenheight() - popup.winfo_height() - 64)
-        popup.geometry(f"+{x}+{y}")
-
-    def open_transfer_target(self, mode: str, local_path: str, remote_path: str) -> None:
-        if mode == "download":
-            subprocess.Popen(["explorer.exe", "/select,", str(Path(local_path))])
+    def grant_remote_execute_permission(self, remote_path: str) -> None:
+        if not self.client:
+            messagebox.showerror("실행 권한 부여 실패", "원격 서버에 연결되어 있지 않습니다.", parent=self)
             return
-        self._set_remote_cwd(posixpath.dirname(remote_path) or ".")
+        name = posixpath.basename(remote_path)
+        self.status.set(f"{name} 실행 권한을 부여하는 중...")
 
-    def grant_transfer_execute_permission(self, mode: str, local_path: str, remote_path: str) -> None:
-        if mode == "download":
-            messagebox.showinfo("실행 권한", "Windows 로컬 파일에는 chmod +x를 적용하지 않습니다.", parent=self)
-            return
-        self._run_remote_background(f"chmod +x -- {shlex.quote(remote_path)}", "원격 파일에 실행 권한을 부여했습니다.")
-
-    def run_transfer_target(self, mode: str, local_path: str, remote_path: str) -> None:
-        if mode == "download":
-            os.startfile(local_path)
-            return
-        remote_dir = posixpath.dirname(remote_path) or "."
-        remote_name = posixpath.basename(remote_path)
-        self._run_remote_background(f"cd {shlex.quote(remote_dir)} && ./{shlex.quote(remote_name)}", f"원격 실행 명령을 보냈습니다: ./{remote_name}")
-
-    def _run_remote_background(self, command: str, success_message: str) -> None:
         def worker() -> None:
             try:
-                self.client.exec_command(command)
+                command = f"chmod +x {shlex.quote(remote_path)}"
+                stdin, stdout, stderr = self.client.exec_command(command)
+                stdin.close()
+                error = stderr.read().decode("utf-8", errors="replace").strip()
+                exit_code = stdout.channel.recv_exit_status()
+                if exit_code != 0:
+                    raise RuntimeError(error or f"chmod 종료 코드: {exit_code}")
             except Exception as exc:
                 detail = str(exc)
-                self.after(0, lambda: messagebox.showerror("실행 실패", detail, parent=self))
+                self.after(0, lambda: self._grant_execute_done(False, name, detail))
                 return
-            self.after(0, lambda: self.status.set(success_message))
+            self.after(0, lambda: self._grant_execute_done(True, name, ""))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _grant_execute_done(self, success: bool, name: str, detail: str) -> None:
+        if success:
+            self.status.set(f"{name} 실행 권한을 부여했습니다. (chmod +x)")
+            self.refresh_remote()
+        else:
+            self.status.set(f"실행 권한 부여 실패: {detail}")
+            messagebox.showerror("실행 권한 부여 실패", f"chmod +x 실행에 실패했습니다.\n{detail}", parent=self)
+
+    def run_remote_executable(self, remote_path: str) -> None:
+        if not self.client:
+            messagebox.showerror("실행 실패", "원격 서버에 연결되어 있지 않습니다.", parent=self)
+            return
+        remote_dir = posixpath.dirname(remote_path) or "."
+        filename = posixpath.basename(remote_path)
+        stop_event, run_event, append_text = self.show_log_viewer(f"실행 - {filename}", color=False)
+
+        def worker() -> None:
+            channel = None
+            try:
+                command = f"cd {shlex.quote(remote_dir)} && ./{shlex.quote(filename)}"
+                stdin, stdout, stderr = self.client.exec_command(command, get_pty=True)
+                stdin.close()
+                channel = stdout.channel
+                while not stop_event.is_set():
+                    if not run_event.is_set():
+                        time.sleep(0.2)
+                        continue
+                    if channel.recv_ready():
+                        data = channel.recv(4096)
+                        if not data:
+                            break
+                        append_text(data.decode("utf-8", errors="replace"))
+                    elif channel.exit_status_ready():
+                        break
+                    else:
+                        time.sleep(0.2)
+                if not stop_event.is_set() and channel.exit_status_ready():
+                    append_text(f"\n[종료 코드: {channel.recv_exit_status()}]\n")
+            except Exception as exc:
+                append_text(f"\n[실행 종료: {exc}]\n")
+            finally:
+                if channel:
+                    channel.close()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_transfer_notification(self, mode: str, transfers: list[tuple[str, str]]) -> None:
+        verb = "업로드" if mode == "upload" else "다운로드"
+        if len(transfers) == 1:
+            local_path, remote_path = transfers[0]
+            message = f"{Path(local_path).name} 파일 {verb}가 완료되었습니다."
+            TransferNotification(self, message, self, local_path, remote_path)
+        else:
+            message = f"{len(transfers)}개 파일 {verb}가 완료되었습니다."
+            TransferNotification(self, message, self, None, None)
 
     def close(self) -> None:
         try:
@@ -2444,12 +2311,9 @@ class CommandManager(tk.Tk):
         ttk.Button(sidebar, text="파일 전송", command=self.open_transfer_explorer).grid(
             row=9, column=0, sticky="ew", pady=3
         )
-        ttk.Button(sidebar, text="Docker", command=self.open_docker_explorer).grid(
-            row=10, column=0, sticky="ew", pady=3
-        )
-        ttk.Separator(sidebar).grid(row=11, column=0, sticky="ew", pady=12)
-        ttk.Button(sidebar, text="수정", command=self.edit_selected).grid(row=12, column=0, sticky="ew", pady=3)
-        ttk.Button(sidebar, text="삭제", command=self.delete_selected).grid(row=13, column=0, sticky="ew", pady=3)
+        ttk.Separator(sidebar).grid(row=10, column=0, sticky="ew", pady=12)
+        ttk.Button(sidebar, text="수정", command=self.edit_selected).grid(row=11, column=0, sticky="ew", pady=3)
+        ttk.Button(sidebar, text="삭제", command=self.delete_selected).grid(row=12, column=0, sticky="ew", pady=3)
 
         main = ttk.Frame(self, padding=16)
         main.grid(row=0, column=1, sticky="nsew")
@@ -2584,7 +2448,7 @@ class CommandManager(tk.Tk):
                     profile.get("host", ""),
                     profile.get("port", 22),
                     profile.get("username", ""),
-                    "예" if profile.get("password") else "아니오",
+                    "예" if profile.get("password") or profile.get("key_path") else "아니오",
                 ),
             )
 
@@ -2776,13 +2640,6 @@ class CommandManager(tk.Tk):
         profile, password, key_path = auth
         FileTransferDialog(self, profile, password, key_path)
 
-    def open_docker_explorer(self) -> None:
-        auth = self._profile_for_transfer()
-        if not auth:
-            return
-        profile, password, key_path = auth
-        FileTransferDialog(self, profile, password, key_path, docker_mode=True)
-
     def _run_transfer(
         self,
         mode: str,
@@ -2804,7 +2661,8 @@ class CommandManager(tk.Tk):
                     hostname=profile["host"],
                     port=int(profile.get("port") or 22),
                     username=profile["username"],
-                    password=password,
+                    password=password or None,
+                    key_filename=profile.get("key_path") or None,
                     look_for_keys=False,
                     allow_agent=False,
                     timeout=15,
@@ -2868,7 +2726,7 @@ class CommandManager(tk.Tk):
                 auth = self._password_for_profile(profile)
                 if not auth:
                     return
-                profile, password = auth
+                profile, password, key_path = auth
                 command = [
                     path,
                     *launcher_args,
@@ -2878,9 +2736,33 @@ class CommandManager(tk.Tk):
                     str(int(profile.get("port") or 22)),
                     "-l",
                     profile["username"],
-                    "-pw",
-                    password,
                 ]
+                if password:
+                    command.extend(["-pw", password])
+                if key_path:
+                    command.extend(["-i", key_path])
+            elif executable_name == "plink.exe":
+                auth = self._password_for_profile(profile)
+                if not auth:
+                    return
+                profile, password, key_path = auth
+                if "-no-antispoof" not in {arg.lower() for arg in launcher_args}:
+                    launcher_args.append("-no-antispoof")
+                remote_shell_command = f"cd {shell_quote(cwd)} ; bash" if cwd else "bash"
+                command = [
+                    path,
+                    *launcher_args,
+                    "-ssh",
+                    f"{profile['username']}@{profile['host']}",
+                    "-P",
+                    str(int(profile.get("port") or 22)),
+                    "-t",
+                    remote_shell_command,
+                ]
+                if password:
+                    command[command.index("-t"):command.index("-t")] = ["-pw", password]
+                if key_path:
+                    command[command.index("-t"):command.index("-t")] = ["-i", key_path]
             elif executable_name in {"cygwin.bat", "mintty.exe", "bash.exe"}:
                 cygwin_root = Path(path).parent
                 if executable_name in {"mintty.exe", "bash.exe"}:
