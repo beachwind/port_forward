@@ -127,12 +127,17 @@ def save_rules(rules: list[dict]) -> None:
 # ------------------------------------------------------------------
 # netsh / 방화벽 액션
 # ------------------------------------------------------------------
-def add_portproxy(listenport, connectport, connectaddress, listenaddress="0.0.0.0"):
-    cmd = (
+def build_add_portproxy_command(listenport, connectport, connectaddress, listenaddress="0.0.0.0"):
+    """netsh interface portproxy add v4tov4 명령어 문자열만 생성 (실행하지 않음)."""
+    return (
         f"netsh interface portproxy add v4tov4 "
         f"listenport={listenport} listenaddress={listenaddress} "
         f"connectport={connectport} connectaddress={connectaddress}"
     )
+
+
+def add_portproxy(listenport, connectport, connectaddress, listenaddress="0.0.0.0"):
+    cmd = build_add_portproxy_command(listenport, connectport, connectaddress, listenaddress)
     return run_command(cmd)
 
 
@@ -871,6 +876,9 @@ class PortForwardApp(tk.Tk):
         ttk.Button(status_frame, text="상태 새로고침", command=self.refresh_mirror_status).pack(side="left", padx=10)
         ttk.Button(status_frame, text="상세 보기", command=self.show_mirror_detail).pack(side="left")
         ttk.Button(status_frame, text="변경 적용", command=self.apply_networking_change).pack(side="left", padx=(6, 0))
+        ttk.Separator(status_frame, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(status_frame, text="설정 저장", command=self.open_save_dialog).pack(side="left")
+        ttk.Button(status_frame, text="설정 불러오기", command=self.load_settings_into_grid).pack(side="left", padx=(4, 0))
 
         # 테이블
         table_frame = ttk.Frame(parent, padding=(10, 0, 10, 10))
@@ -894,6 +902,7 @@ class PortForwardApp(tk.Tk):
         ttk.Button(bottom, text="선택 규칙 삭제", command=self.delete_selected).pack(side="left", padx=4)
         ttk.Button(bottom, text="선택 규칙 재적용", command=self.reapply_selected).pack(side="left", padx=4)
         ttk.Button(bottom, text="전체 규칙 재적용", command=self.reapply_all).pack(side="left", padx=4)
+        ttk.Button(bottom, text="선택 규칙 명령어 변환", command=self.convert_selected_to_command).pack(side="left", padx=4)
 
         ttk.Button(bottom, text="방화벽 규칙 추가", command=self.open_firewall_add_dialog).pack(side="right", padx=4)
         ttk.Button(bottom, text="방화벽 규칙 삭제", command=self.open_firewall_delete_dialog).pack(side="right", padx=4)
@@ -1777,6 +1786,90 @@ class PortForwardApp(tk.Tk):
             self.refresh_table()
 
         self.run_bg(worker, on_done=done)
+
+    def convert_selected_to_command(self):
+        """그리드에서 선택된 규칙(들)에 대한 netsh 명령어를 생성하여
+        하단 '실행 명령어' 표시란에 보여주고 클립보드에 복사한다.
+        (실제로 실행하지는 않는다.)"""
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("안내", "명령어로 변환할 규칙을 목록에서 선택해주세요.")
+            return
+
+        cmds = []
+        for item_id in sel:
+            vals = self.tree.item(item_id, "values")
+            listenaddress, listenport, connectaddress, connectport = vals[0], vals[1], vals[2], vals[3]
+            cmds.append(
+                build_add_portproxy_command(listenport, connectport, connectaddress, listenaddress)
+            )
+
+        full_cmd = "\n".join(cmds)
+
+        # 하단 실행 명령어 표시란 갱신 (클립보드 복사용 원본은 self.last_command)
+        self.last_command = full_cmd
+        if len(cmds) == 1:
+            self.command_var.set(f"실행 명령어: {cmds[0]}")
+        else:
+            self.command_var.set(f"실행 명령어 ({len(cmds)}건, 줄바꿈으로 구분됨): {cmds[0]}  ...")
+
+        # 클립보드에 복사
+        self.clipboard_clear()
+        self.clipboard_append(full_cmd)
+        self.update()  # 창이 바로 닫혀도 클립보드 내용이 유지되도록 보장
+
+        self.set_status(f"선택한 {len(cmds)}건의 명령어를 표시하고 클립보드에 복사했습니다.")
+
+    # ---------------- 설정 불러오기 (그리드 전용, 시스템 미반영) ----------------
+    def load_settings_into_grid(self):
+        """저장된 설정 파일(JSON)을 불러와 기존 그리드 내용을 모두 지운 뒤
+        불러온 내용으로 그리드를 채운다. (실제 시스템/netsh에는 반영하지 않음)"""
+        file_path = filedialog.askopenfilename(
+            title="포트 포워딩 설정 불러오기",
+            filetypes=[("JSON 파일", "*.json"), ("모든 파일", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                rules = json.load(f)
+        except Exception as e:
+            messagebox.showerror("실패", f"파일을 읽는 중 오류가 발생했습니다:\n{e}")
+            return
+
+        if not isinstance(rules, list):
+            messagebox.showwarning("안내", "올바른 설정 파일이 아닙니다.")
+            return
+
+        # 기존 그리드 내용을 모두 삭제한다.
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        loaded_count = 0
+        for r in rules:
+            try:
+                listenaddress = r.get("listenaddress", "0.0.0.0")
+                listenport = r["listenport"]
+                connectaddress = r["connectaddress"]
+                connectport = r["connectport"]
+                note = r.get("note", "")
+                created_at = r.get("created_at", "")
+            except (KeyError, TypeError, AttributeError):
+                continue
+            self.tree.insert(
+                "", "end",
+                values=(listenaddress, listenport, connectaddress, connectport, note, created_at),
+            )
+            loaded_count += 1
+
+        self.set_status(f"설정 파일을 그리드로 불러왔습니다. ({loaded_count}건, 시스템 미반영)")
+        messagebox.showinfo(
+            "완료",
+            f"{loaded_count}건의 설정을 불러와 그리드에 표시했습니다.\n"
+            f"※ 실제 시스템(netsh)에는 반영되지 않았습니다.\n"
+            f"필요하면 '선택 규칙 재적용' 또는 '전체 규칙 재적용' 버튼을 사용해 실제로 적용하세요.",
+        )
 
     # ---------------- 방화벽 규칙 관리 ----------------
     def open_firewall_add_dialog(self):
