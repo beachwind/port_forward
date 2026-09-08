@@ -2045,6 +2045,79 @@ class FileTransferDialog(tk.Toplevel):
             self.destroy()
 
 
+class DockerRunDialog(tk.Toplevel):
+    """`docker run -d --name ... -p ... <image>` 실행에 필요한 값을 입력받는 대화상자."""
+
+    def __init__(self, master: tk.Widget, initial: dict | None = None):
+        super().__init__(master)
+        self.title("Docker 컨테이너 Run")
+        self.resizable(False, False)
+        self.result: dict | None = None
+        initial = initial or {}
+
+        self.name_var = tk.StringVar(value=initial.get("name", ""))
+        self.image_var = tk.StringVar(value=initial.get("image", ""))
+        self.ports_var = tk.StringVar(value=initial.get("ports", ""))
+        self.extra_var = tk.StringVar(value=initial.get("extra", ""))
+        self.remove_existing_var = tk.BooleanVar(value=True)
+
+        frame = ttk.Frame(self, padding=12)
+        frame.grid(row=0, column=0, sticky="nsew")
+        frame.columnconfigure(0, weight=1)
+
+        ttk.Label(frame, text="컨테이너 이름").grid(row=0, column=0, sticky="w", pady=(0, 2))
+        ttk.Entry(frame, textvariable=self.name_var, width=48).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(frame, text="이미지 (예: blitz-admin-api:v18.6)").grid(row=2, column=0, sticky="w", pady=(0, 2))
+        ttk.Entry(frame, textvariable=self.image_var, width=48).grid(row=3, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(
+            frame, text="포트 매핑 (쉼표로 구분, 예: 21391:3300, 62000-62003:62000-62003)"
+        ).grid(row=4, column=0, sticky="w", pady=(0, 2))
+        ttk.Entry(frame, textvariable=self.ports_var, width=48).grid(row=5, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(frame, text="추가 docker run 옵션 (선택, 예: -v /data:/data -e KEY=VALUE)").grid(
+            row=6, column=0, sticky="w", pady=(0, 2)
+        )
+        ttk.Entry(frame, textvariable=self.extra_var, width=48).grid(row=7, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Checkbutton(
+            frame,
+            text="동일한 이름의 기존 컨테이너가 있으면 먼저 중지 후 삭제",
+            variable=self.remove_existing_var,
+        ).grid(row=8, column=0, sticky="w", pady=(0, 8))
+
+        button_row = ttk.Frame(frame)
+        button_row.grid(row=9, column=0, sticky="e")
+        ttk.Button(button_row, text="취소", command=self._cancel).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(button_row, text="실행", command=self._confirm).grid(row=0, column=1)
+
+        self.transient(master)
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Return>", lambda _event: self._confirm())
+        self.bind("<Escape>", lambda _event: self._cancel())
+
+    def _confirm(self) -> None:
+        name = self.name_var.get().strip()
+        image = self.image_var.get().strip()
+        if not name or not image:
+            messagebox.showerror("입력 필요", "컨테이너 이름과 이미지는 필수 입력값입니다.", parent=self)
+            return
+        self.result = {
+            "name": name,
+            "image": image,
+            "ports": self.ports_var.get().strip(),
+            "extra": self.extra_var.get().strip(),
+            "remove_existing": self.remove_existing_var.get(),
+        }
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = None
+        self.destroy()
+
+
 class DockerTransferDialog(FileTransferDialog):
     """파일 전송 탐색기와 동일한 UI를 사용하되, 원격 그리드 목록에 원격 서버의
     Docker 컨테이너 목록(docker ps)을 디렉토리/파일과 함께 표시하는 탐색기."""
@@ -2077,6 +2150,86 @@ class DockerTransferDialog(FileTransferDialog):
         # 물결/파도
         image.put("#ffffff", to=(1, 12, 15, 13))
         return image
+
+    def _build_action_icons(self) -> dict[str, tk.PhotoImage]:
+        icons = super()._build_action_icons()
+        icons["docker_stop"] = self._docker_action_icon("stop")
+        icons["docker_build"] = self._docker_action_icon("build")
+        icons["docker_run"] = self._docker_action_icon("run")
+        return icons
+
+    def _docker_action_icon(self, shape: str) -> tk.PhotoImage:
+        image = tk.PhotoImage(width=16, height=16)
+        image.put("#f7f7f7", to=(0, 0, 16, 16))
+        image.put("#d0d0d0", to=(0, 0, 16, 1))
+        image.put("#d0d0d0", to=(0, 15, 16, 16))
+        image.put("#d0d0d0", to=(0, 0, 1, 16))
+        image.put("#d0d0d0", to=(15, 0, 16, 16))
+        if shape == "stop":
+            image.put("#c53030", to=(5, 5, 11, 11))
+        elif shape == "build":
+            image.put("#4a5568", to=(3, 4, 13, 7))  # 망치 머리
+            image.put("#8a5a2b", to=(7, 7, 9, 13))  # 망치 손잡이
+        elif shape == "run":
+            image.put("#2f855a", to=(5, 4, 7, 12))
+            image.put("#2f855a", to=(7, 5, 9, 11))
+            image.put("#2f855a", to=(9, 6, 11, 10))
+            image.put("#2f855a", to=(11, 7, 12, 9))
+        return image
+
+    def _build_remote_pane(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(4, weight=1)
+        ttk.Label(parent, text="원격 서버 파일 탐색기", font=("Segoe UI", 11, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        self.remote_path_var = tk.StringVar()
+        favorite_group = ttk.LabelFrame(parent, text="즐겨찾기")
+        favorite_group.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        favorite_group.columnconfigure(0, weight=1)
+        self.remote_favorite_combo = ttk.Combobox(
+            favorite_group,
+            textvariable=self.remote_favorite_var,
+            state="readonly",
+            values=self._remote_favorites_sorted(),
+        )
+        self.remote_favorite_combo.grid(row=0, column=0, sticky="ew", padx=(3, 0), pady=3)
+        self.remote_favorite_combo.bind("<<ComboboxSelected>>", self.use_remote_favorite)
+
+        path_group = ttk.LabelFrame(parent, text="경로 이동")
+        path_group.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        path_group.columnconfigure(0, weight=1)
+        self.remote_path_entry = ttk.Entry(path_group, textvariable=self.remote_path_var)
+        self.remote_path_entry.grid(row=0, column=0, sticky="ew", padx=(3, 0), pady=3)
+        self.remote_path_entry.bind("<Return>", lambda _event: self.goto_remote_path())
+        self._icon_button(path_group, "go", "이동", self.goto_remote_path, 0, 1)
+        self._icon_button(path_group, "register", "등록", self.add_remote_favorite, 0, 2)
+
+        action_group = ttk.LabelFrame(parent, text="작업")
+        action_group.grid(row=3, column=0, sticky="ew", pady=3)
+        remote_actions = [
+            ("folder", "새 폴더", self.create_remote_folder),
+            ("empty", "빈 파일", self.create_remote_empty_file),
+            ("view", "파일 보기", self.view_remote_selected),
+            ("log", "로그 보기", self.view_remote_log),
+            ("today_log", "금일 로그 보기", self.view_today_remote_log),
+            ("log_color", "로그 보기(색상)", self.view_remote_log_color),
+            ("edit", "편집", self.edit_remote_with_gvim),
+            ("rename", "파일명 변경", self.rename_remote_selected),
+            ("delete", "삭제", self.delete_remote_selected),
+            ("terminal", "터미널", self.open_remote_terminal),
+            ("clipboard", "클립보드 보기", self.view_remote_clipboard),
+            ("screenshot", "스크린샷", self.capture_remote_screenshot),
+            ("docker_stop", "Docker 컨테이너 중지", self.stop_selected_container),
+            ("docker_build", "Docker 컨테이너 빌드", self.build_docker_image),
+            ("docker_run", "Docker 컨테이너 run", self.run_docker_container),
+        ]
+        for column, (icon, tooltip, command) in enumerate(remote_actions):
+            self._icon_button(action_group, icon, tooltip, command, 0, column)
+
+        self.remote_tree = self._make_tree(parent)
+        self.remote_tree.grid(row=4, column=0, sticky="nsew")
+        self._bind_tree_events(self.remote_tree, "remote")
 
     def refresh_remote(self) -> None:
         if not self.client:
@@ -2401,6 +2554,11 @@ class DockerTransferDialog(FileTransferDialog):
                 menu.add_command(label="폴더 열기", command=lambda: self.open_remote_item(row))
                 menu.add_command(label="컨테이너 정보 보기", command=lambda: self.show_container_details(row))
                 menu.add_command(label="로그 보기(docker logs)", command=lambda: self.view_container_logs(row))
+                menu.add_separator()
+                menu.add_command(label="Docker 컨테이너 중지", command=self.stop_selected_container)
+                menu.add_command(label="Docker 컨테이너 빌드", command=self.build_docker_image)
+                menu.add_command(label="Docker 컨테이너 run", command=self.run_docker_container)
+                menu.add_separator()
                 menu.add_command(label="새로 고침", command=self.refresh_remote)
                 try:
                     menu.tk_popup(event.x_root, event.y_root)
@@ -2471,6 +2629,153 @@ class DockerTransferDialog(FileTransferDialog):
         messagebox.showerror(action, detail, parent=self)
 
     # ------------------------------------------------------------------
+    # Docker 컨테이너 중지 / 빌드 / run
+    # ------------------------------------------------------------------
+    def _selected_or_current_container(self) -> dict | None:
+        """현재 컨테이너 내부를 탐색 중이면 그 컨테이너를, 아니면 원격 목록에서
+        선택된 컨테이너 행을 반환한다."""
+        if self.container_context is not None:
+            return {"id": self.container_context["id"], "name": self.container_context["name"]}
+        tree = self._tree_widget(self.remote_tree)
+        selected = tree.selection()
+        if selected:
+            item = selected[0]
+            if tree.exists(item) and tree.set(item, "type") == "컨테이너":
+                container_id = self._container_id_from_item(item)
+                if container_id:
+                    return {"id": container_id, "name": tree.item(item, "text")}
+        return None
+
+    def stop_selected_container(self) -> None:
+        container = self._selected_or_current_container()
+        if not container:
+            messagebox.showinfo(
+                "선택 필요",
+                "중지할 컨테이너를 원격 목록에서 선택하거나, 해당 컨테이너 내부를 탐색 중이어야 합니다.",
+                parent=self,
+            )
+            return
+        if not messagebox.askyesno(
+            "컨테이너 중지",
+            f"'{container['name']}' 컨테이너를 중지할까요?\n(docker stop {container['id']})",
+            parent=self,
+        ):
+            return
+        self.status.set(f"{container['name']} 컨테이너를 중지하는 중...")
+
+        def worker() -> None:
+            try:
+                self._run_remote_ok(f"docker stop {shlex.quote(container['id'])}", timeout=60)
+            except Exception as exc:
+                detail = str(exc)
+                self.after(0, lambda: self._container_action_failed("컨테이너 중지", detail))
+                return
+            self.after(0, lambda: self._container_stopped(container))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _container_stopped(self, container: dict) -> None:
+        self.status.set(f"{container['name']} 컨테이너를 중지했습니다.")
+        messagebox.showinfo("컨테이너 중지 완료", f"'{container['name']}' 컨테이너를 중지했습니다.", parent=self)
+        if self.container_context and self.container_context["id"] == container["id"]:
+            self.container_context = None
+        self.refresh_remote()
+
+    def build_docker_image(self) -> None:
+        """docker build -t <태그> <경로> 를 원격 서버에서 실행하고 빌드 로그를 실시간으로 보여준다."""
+        context_path = simpledialog.askstring(
+            "Docker 빌드",
+            "Dockerfile이 있는 원격 서버 디렉터리 경로를 입력하세요.\n(예: /home/blitz/projects/blitz-admin-api)",
+            parent=self,
+        )
+        if not context_path:
+            return
+        image_tag = simpledialog.askstring(
+            "Docker 빌드",
+            "빌드할 이미지 태그를 입력하세요.\n(예: blitz-admin-api:v18.6)",
+            parent=self,
+        )
+        if not image_tag:
+            return
+        command = f"cd {shlex.quote(context_path)} && docker build -t {shlex.quote(image_tag)} ."
+        self.run_streaming_command(f"Docker Build: {image_tag}", command)
+
+    def run_docker_container(self) -> None:
+        """docker run -d --name ... -p ... <이미지> 를 원격 서버에서 실행하고 로그를 실시간으로 보여준다."""
+        container = self._selected_or_current_container()
+        initial = {"name": container["name"]} if container else {}
+        dialog = DockerRunDialog(self, initial)
+        self.wait_window(dialog)
+        if not dialog.result:
+            return
+        result = dialog.result
+        port_args = [f"-p {shlex.quote(part.strip())}" for part in result["ports"].split(",") if part.strip()]
+        command_parts = ["docker", "run", "-d", "--name", shlex.quote(result["name"]), *port_args]
+        if result["extra"]:
+            command_parts.append(result["extra"])
+        command_parts.append(shlex.quote(result["image"]))
+        run_command = " ".join(command_parts)
+
+        def prepare() -> None:
+            if result["remove_existing"]:
+                # 기존에 같은 이름의 컨테이너가 없을 수도 있으므로 실패는 무시한다.
+                self._run_remote_best_effort(f"docker stop {shlex.quote(result['name'])}")
+                self._run_remote_best_effort(f"docker rm {shlex.quote(result['name'])}")
+            self.after(0, lambda: self.run_streaming_command(f"Docker Run: {result['name']}", run_command))
+
+        self.status.set(f"{result['name']} 컨테이너 실행을 준비하는 중...")
+        threading.Thread(target=prepare, daemon=True).start()
+
+    def run_streaming_command(self, title: str, command: str) -> None:
+        """원격 명령을 실행하고 실시간 출력을 로그 뷰어 창에 스트리밍한다.
+        (docker build / docker run 등 시간이 걸리는 명령의 진행 상황 확인용)"""
+        stop_event, run_event, append_text = self.show_log_viewer(title)
+
+        def worker() -> None:
+            channel = None
+            try:
+                stdin, stdout, stderr = self.client.exec_command(command, get_pty=True)
+                stdin.close()
+                channel = stdout.channel
+                while not stop_event.is_set():
+                    if not run_event.is_set():
+                        time.sleep(0.2)
+                        continue
+                    if channel.recv_ready():
+                        data = channel.recv(4096)
+                        if not data:
+                            break
+                        append_text(data.decode("utf-8", errors="replace"))
+                    elif channel.exit_status_ready():
+                        while channel.recv_ready():
+                            data = channel.recv(4096)
+                            if not data:
+                                break
+                            append_text(data.decode("utf-8", errors="replace"))
+                        break
+                    else:
+                        time.sleep(0.2)
+                if not stop_event.is_set():
+                    exit_status = channel.recv_exit_status() if channel else None
+                    append_text(f"\n\n[명령 종료: 코드 {exit_status}]\n")
+                    self.after(0, lambda: self._streaming_command_finished(title, exit_status))
+            except Exception as exc:
+                detail = str(exc)
+                append_text(f"\n[실행 오류: {detail}]\n")
+            finally:
+                if channel:
+                    try:
+                        channel.close()
+                    except Exception:
+                        pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _streaming_command_finished(self, title: str, exit_status: int | None) -> None:
+        self.status.set(f"{title} 완료 (종료 코드: {exit_status})")
+        self.refresh_remote()
+
+    # ------------------------------------------------------------------
     # Docker 컨테이너 / 컨테이너 내부 폴더·파일을 로컬로 드래그하여 다운로드
     # ------------------------------------------------------------------
     def start_drag(self, event, source: str) -> None:
@@ -2498,7 +2803,147 @@ class DockerTransferDialog(FileTransferDialog):
             local_folder = self._drop_local_folder(local_tree, event.x_root, event.y_root) or self.local_cwd
             self._confirm_and_download_docker_items(items, local_folder)
             return
+        if self.drag_data and self.drag_data.get("source") == "local":
+            remote_tree = self._tree_widget(self.remote_tree)
+            target_tree = self._drop_tree_at_pointer(event.x_root, event.y_root)
+            if target_tree == remote_tree:
+                docker_target = self._docker_drop_target(remote_tree, event.x_root, event.y_root)
+                if docker_target is not None:
+                    items = self.drag_data["items"]
+                    self.drag_data = None
+                    self._confirm_and_upload_to_container(items, docker_target)
+                    return
         super().finish_drag(event)
+
+    def _docker_drop_target(self, tree: ttk.Treeview, x_root: int, y_root: int) -> dict | None:
+        """로컬 파일을 드롭한 위치가 Docker 컨테이너 관련 대상(컨테이너 자체,
+        컨테이너 내부 폴더, 또는 현재 탐색 중인 컨테이너 경로)이면 업로드에
+        필요한 정보를 담은 dict를, 아니면 None을 반환한다."""
+        row = tree.identify_row(y_root - tree.winfo_rooty())
+        if row:
+            if row in ("remote:..", "remote:ctrback:.."):
+                return None
+            kind = tree.set(row, "type")
+            if kind == "컨테이너":
+                container_id = self._container_id_from_item(row)
+                if not container_id:
+                    return None
+                return {"container_id": container_id, "path": "/", "name": tree.item(row, "text")}
+            if kind == "컨테이너 폴더":
+                prefix = "remote:ctrpath:"
+                full_path = self._container_full_path_from_item(row)
+                if full_path is None or not row.startswith(prefix):
+                    return None
+                container_id = row[len(prefix):].split("\x1f", 1)[0]
+                return {
+                    "container_id": container_id,
+                    "path": full_path,
+                    "name": posixpath.basename(full_path) or full_path,
+                }
+            return None
+        # 특정 행이 아니라 빈 영역에 드롭한 경우: 현재 컨테이너 내부를 탐색 중이면
+        # 그 경로를 업로드 대상으로 사용한다.
+        if self.container_context is not None:
+            return {
+                "container_id": self.container_context["id"],
+                "path": self.container_context["path"],
+                "name": self.container_context["name"],
+            }
+        return None
+
+    def _confirm_and_upload_to_container(self, items: list[str], target: dict) -> None:
+        local_paths = [item.removeprefix("local:") for item in items]
+        local_paths = [p for p in local_paths if Path(p).is_file()]
+        if not local_paths:
+            messagebox.showinfo("업로드 불가", "폴더는 지원하지 않으며, 파일만 컨테이너로 업로드할 수 있습니다.", parent=self)
+            return
+        names = ", ".join(Path(p).name for p in local_paths)
+        message = f"{names} 파일을 '{target['name']}' 컨테이너의 {target['path']} 경로로 업로드할까요?\n(docker cp)"
+        if not messagebox.askyesno("Docker 업로드", message, parent=self):
+            return
+        self._upload_to_container(local_paths, target)
+
+    def _upload_to_container(self, local_paths: list[str], target: dict) -> None:
+        total_items = len(local_paths)
+        self.status.set(f"컨테이너로 업로드 준비 중... (0/{total_items})")
+        self._set_progress_mode("determinate")
+
+        def worker() -> None:
+            results = []
+            for index, local_path in enumerate(local_paths, start=1):
+                try:
+                    self._upload_one_file_to_container(local_path, target, index, total_items)
+                    results.append((Path(local_path).name, True, ""))
+                except Exception as exc:
+                    results.append((Path(local_path).name, False, str(exc)))
+            self.after(0, lambda: self._docker_upload_done(results, target))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _upload_one_file_to_container(self, local_path: str, target: dict, index: int, total: int) -> None:
+        container_id = target["container_id"]
+        dest_dir = target["path"]
+        filename = Path(local_path).name
+        label = f"({index}/{total}) {filename}"
+
+        self.after(0, lambda: self.status.set(f"{label}: 서버로 업로드 준비 중..."))
+        tmp_dir = self._make_remote_tempdir()
+        try:
+            remote_temp_path = posixpath.join(tmp_dir, filename)
+            file_size = max(1, Path(local_path).stat().st_size)
+
+            def callback(transferred: int, _total: int) -> None:
+                percent = min(100, (transferred / file_size) * 100)
+                self.after(0, lambda value=percent: self._update_progress(value, f"{label}: 서버로 전송 중"))
+
+            with self.sftp_lock:
+                self.sftp.put(local_path, remote_temp_path, callback=callback)
+
+            self.after(
+                0,
+                lambda: (
+                    self._set_progress_mode("indeterminate"),
+                    self.status.set(f"{label}: 컨테이너에 반영 중 (docker cp)..."),
+                ),
+            )
+            dest_path = posixpath.join(dest_dir, filename)
+            self._run_remote_ok(
+                f"docker cp {shlex.quote(remote_temp_path)} {shlex.quote(container_id + ':' + dest_path)}",
+                timeout=None,
+            )
+        finally:
+            self._run_remote_best_effort(f"rm -rf {shlex.quote(tmp_dir)}")
+        self.after(0, lambda: self._set_progress_mode("determinate"))
+
+    def _docker_upload_done(self, results: list[tuple[str, bool, str]], target: dict) -> None:
+        self._set_progress_mode("determinate")
+        success = [r for r in results if r[1]]
+        failed = [r for r in results if not r[1]]
+        if success and not failed:
+            self.progress_var.set(100)
+            self.progress_text_var.set("100%")
+            names = ", ".join(r[0] for r in success)
+            self.status.set(f"컨테이너 업로드 완료: {names}")
+            messagebox.showinfo(
+                "업로드 완료",
+                f"{names} 파일을 '{target['name']}' 컨테이너의 {target['path']} 경로로 업로드했습니다.",
+                parent=self,
+            )
+        elif success and failed:
+            ok_names = ", ".join(r[0] for r in success)
+            fail_detail = "\n".join(f"- {r[0]}: {r[2]}" for r in failed)
+            self.status.set(f"일부 파일 업로드 실패 ({len(failed)}건)")
+            messagebox.showwarning("일부 실패", f"성공: {ok_names}\n\n실패:\n{fail_detail}", parent=self)
+        else:
+            fail_detail = "\n".join(f"- {r[0]}: {r[2]}" for r in failed)
+            self.status.set("컨테이너 업로드 실패")
+            messagebox.showerror("업로드 실패", fail_detail, parent=self)
+        if (
+            self.container_context
+            and self.container_context["id"] == target["container_id"]
+            and self.container_context["path"] == target["path"]
+        ):
+            self.refresh_remote()
 
     def _docker_drag_source(self, item: str) -> dict | None:
         """드래그 중인 원격 항목이 Docker 컨테이너/컨테이너 폴더/파일이면
