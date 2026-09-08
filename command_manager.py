@@ -3065,8 +3065,18 @@ class DockerTransferDialog(FileTransferDialog):
             raise RuntimeError(err or f"명령 실행에 실패했습니다 (종료 코드 {exit_code}).")
 
     def _run_remote_best_effort(self, command: str) -> None:
+        """실패는 무시하되(best-effort), 원격 명령이 실제로 종료될 때까지 대기한다.
+        exec_command()는 명령을 비동기로 실행하고 즉시 반환하므로, 종료 상태를
+        확인하지 않으면 (예: run_docker_container의 '기존 컨테이너 중지 후 삭제')
+        뒤이어 실행되는 명령이 앞선 명령의 완료보다 먼저 실행되는 경쟁 조건이
+        발생할 수 있다."""
         try:
-            self.client.exec_command(command)
+            with self.sftp_lock:
+                stdin, stdout, stderr = self.client.exec_command(command)
+                stdin.close()
+                stdout.read()
+                stderr.read()
+                stdout.channel.recv_exit_status()
         except Exception:
             pass
 
