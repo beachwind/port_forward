@@ -2119,6 +2119,7 @@ class DockerTransferDialog(FileTransferDialog):
         # None이면 호스트(서버) 목록, dict이면 특정 컨테이너 내부를 탐색 중임을 의미한다.
         # {"id": 컨테이너ID, "name": 표시용 이름, "path": 컨테이너 내부 현재 경로}
         self.container_context: dict | None = None
+        self.last_docker_image_tag: str = ""
 
     def _build_extra_icons(self) -> None:
         self.docker_icon = self._docker_icon()
@@ -2179,6 +2180,14 @@ class DockerTransferDialog(FileTransferDialog):
         self._icon_button(toolbar, "docker_build", "Docker Build", self.build_docker_image, 0, start_column).grid(
             row=0, column=start_column, padx=(6, 0)
         )
+        self._icon_button(
+            toolbar,
+            "docker_run",
+            "Docker 실행/교체",
+            self.run_docker_container,
+            0,
+            start_column + 1,
+        ).grid(row=0, column=start_column + 1, padx=(4, 0))
 
     def _build_remote_pane(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -2926,6 +2935,38 @@ class DockerTransferDialog(FileTransferDialog):
             "path": container_path,
         }
 
+    def _docker_image_hint_from_path_entry(self) -> str:
+        build_context = self._docker_build_context_from_path_entry()
+        if not build_context:
+            return ""
+        service = posixpath.basename(build_context["path"].rstrip("/")) or "image"
+        return f"{service}:latest"
+
+    def _docker_build_image_tag(self, build_context: dict) -> str:
+        service = posixpath.basename(build_context["path"].rstrip("/")) or "image"
+        container_parent = posixpath.dirname(build_context["path"].rstrip("/")) or "/"
+        version_path = posixpath.join(container_parent, f"{service}.version")
+        command = (
+            "docker exec "
+            + shlex.quote(build_context["container_id"])
+            + " /bin/sh -lc "
+            + shlex.quote(f"cat {shlex.quote(version_path)} 2>/dev/null || true")
+        )
+        try:
+            data, _err, exit_code = self._exec_with_sudo_fallback(command, timeout=10)
+        except Exception:
+            return f"{service}:latest"
+        if exit_code != 0:
+            return f"{service}:latest"
+        version_text = data.decode("utf-8", errors="replace").strip()
+        if not version_text:
+            return f"{service}:latest"
+        try:
+            next_version = float(version_text) + 0.1
+        except ValueError:
+            return f"{service}:latest"
+        return f"{service}:v{next_version:.1f}"
+
     def build_docker_image(self) -> None:
         """서비스 폴더명과 상위 version 파일을 기준으로 Docker 이미지를 빌드한다."""
         build_context = self._docker_build_context_from_path_entry()
@@ -2954,7 +2995,7 @@ docker cp "$container_id:$container_path" "$context"
 docker cp "$container_id:$container_parent/$service.version" "$version_file" >/dev/null 2>&1 || true
 if [ -f "$context/Dockerfile" ]; then
   echo "prebuild_cleanup=scan Dockerfile symlink targets"
-  sed -n -E 's/^[[:space:]]*RUN[[:space:]]+ln[[:space:]]+-s[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:];]+).*$/\1/p' "$context/Dockerfile" |
+  sed -n -E 's/^[[:space:]]*RUN[[:space:]]+ln[[:space:]]+-s[[:space:]]+[^[:space:]]+[[:space:]]+([^[:space:];]+).*$/\\1/p' "$context/Dockerfile" |
   while IFS= read -r link_target; do
     case "$link_target" in
       /app/*)
@@ -2966,6 +3007,10 @@ if [ -f "$context/Dockerfile" ]; then
         ;;
     esac
   done
+  if grep -Eq '^[[:space:]]*RUN[[:space:]]+ln[[:space:]]+-s[[:space:]]+' "$context/Dockerfile"; then
+    echo "prebuild_cleanup=patch Dockerfile ln -s targets"
+    sed -i.bak -E 's#^([[:space:]]*RUN[[:space:]]+)ln[[:space:]]+-s[[:space:]]+([^[:space:]]+)[[:space:]]+([^[:space:];]+)(.*)$#\\1rm -rf \\3 \\&\\& ln -s \\2 \\3\\4#' "$context/Dockerfile"
+  fi
 fi
 service=$(basename "$context")
 version="latest"
@@ -2984,6 +3029,8 @@ docker build --progress=plain --tag "$service:$version" "$context"
 """.strip()
         context_path = build_context["path"]
         service_hint = posixpath.basename(context_path.rstrip("/")) or "image"
+        image_tag = self._docker_build_image_tag(build_context)
+        self.last_docker_image_tag = image_tag
         command = (
             "bash -lc "
             + shlex.quote(script)
@@ -2995,7 +3042,7 @@ docker build --progress=plain --tag "$service:$version" "$context"
         if not messagebox.askyesno(
             "Docker Build",
             f"[Docker:{build_context['container_name']}] {context_path} 경로를 기준으로 Docker 이미지를 빌드할까요?\n"
-            f"이미지 태그는 원격에서 {service_hint}:latest 또는 {service_hint}:vN.N 형식으로 자동 계산됩니다.",
+            f"예상 이미지 태그: {image_tag}",
             parent=self,
         ):
             return
@@ -3005,7 +3052,12 @@ docker build --progress=plain --tag "$service:$version" "$context"
     def run_docker_container(self) -> None:
         """docker run -d --name ... -p ... <이미지> 를 원격 서버에서 실행하고 로그를 실시간으로 보여준다."""
         container = self._selected_or_current_container()
-        initial = {"name": container["name"]} if container else {}
+        initial = {}
+        if container:
+            initial["name"] = container["name"]
+        image_hint = self.last_docker_image_tag or self._docker_image_hint_from_path_entry()
+        if image_hint:
+            initial["image"] = image_hint
         dialog = DockerRunDialog(self, initial)
         self.wait_window(dialog)
         if not dialog.result:
