@@ -69,6 +69,21 @@ def format_mtime(timestamp: float | int | None) -> str:
     return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
 
 
+# `docker exec <container> sh -c "ls -la -- <path>"` 출력의 각 줄을 파싱하기 위한 정규식.
+# 예: "drwxr-xr-x 12 root root 4096 Jan  1 00:00 etc" / "-rw-r--r-- 1 root root 123 Jan  1 00:00 file -> target"
+CONTAINER_LS_LINE_RE = re.compile(
+    r"^(?P<perm>[bcdlpsD-][-rwxXsStTugo]{9}\+?)\s+"
+    r"(?P<links>\d+)\s+"
+    r"(?P<owner>\S+)\s+"
+    r"(?P<group>\S+)\s+"
+    r"(?P<size>\d+)\s+"
+    r"(?P<month>\S+)\s+"
+    r"(?P<day>\S+)\s+"
+    r"(?P<time>\S+)\s+"
+    r"(?P<name>.+)$"
+)
+
+
 class ToolTip:
     def __init__(self, widget: tk.Widget, text: str):
         self.widget = widget
@@ -2037,6 +2052,9 @@ class DockerTransferDialog(FileTransferDialog):
     def __init__(self, master: tk.Tk, profile: dict, password: str, key_path: str = ""):
         super().__init__(master, profile, password, key_path)
         self.title(f"Docker 파일 전송 - {profile.get('name', profile.get('host', 'server'))}")
+        # None이면 호스트(서버) 목록, dict이면 특정 컨테이너 내부를 탐색 중임을 의미한다.
+        # {"id": 컨테이너ID, "name": 표시용 이름, "path": 컨테이너 내부 현재 경로}
+        self.container_context: dict | None = None
 
     def _build_extra_icons(self) -> None:
         self.docker_icon = self._docker_icon()
@@ -2061,6 +2079,14 @@ class DockerTransferDialog(FileTransferDialog):
         return image
 
     def refresh_remote(self) -> None:
+        if not self.client:
+            return
+        if self.container_context is not None:
+            self._refresh_container_listing()
+            return
+        self._refresh_host_listing()
+
+    def _refresh_host_listing(self) -> None:
         if not self.sftp:
             return
         tree = self._tree_widget(self.remote_tree)
@@ -2087,25 +2113,120 @@ class DockerTransferDialog(FileTransferDialog):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _refresh_container_listing(self) -> None:
+        tree = self._tree_widget(self.remote_tree)
+        tree.delete(*tree.get_children())
+        container_id = self.container_context["id"]
+        name = self.container_context["name"]
+        path = self.container_context["path"]
+        self.remote_path_var.set(f"[Docker:{name}] {path}")
+        tree.insert("", "end", iid="remote:ctrback:..", text="..", image=self.folder_icon, values=("폴더", "", ""))
+        self.status.set(f"{name} 컨테이너 내부 {path} 를 읽는 중...")
+
+        def worker() -> None:
+            entries, error = self._list_container_directory(container_id, path)
+            self.after(0, lambda: self._fill_container_rows(entries, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _list_container_directory(self, container_id: str, path: str) -> tuple[list[dict], str]:
+        """`docker exec <container> sh -c "ls -la -- <path>"` 결과를 파싱해
+        디렉토리 항목 목록을 만든다."""
+        if not self.client:
+            return [], ""
+        inner_cmd = f"ls -la -- {shlex.quote(path)}"
+        command = f"docker exec {shlex.quote(container_id)} sh -c {shlex.quote(inner_cmd)}"
+        try:
+            data, err, exit_code = self._exec_with_sudo_fallback(command, timeout=10)
+        except Exception as exc:
+            return [], str(exc)
+        if exit_code != 0:
+            return [], err or f"ls 종료 코드: {exit_code}"
+        output = data.decode("utf-8", errors="replace")
+        entries: list[dict] = []
+        for line in output.splitlines():
+            match = CONTAINER_LS_LINE_RE.match(line.strip())
+            if not match:
+                continue
+            name = match.group("name")
+            if " -> " in name:
+                name = name.split(" -> ", 1)[0]
+            if name in (".", ".."):
+                continue
+            perm = match.group("perm")
+            is_dir = perm[0] == "d"
+            size = None if is_dir else int(match.group("size"))
+            modified = f"{match.group('month')} {match.group('day')} {match.group('time')}"
+            entries.append({"name": name, "is_dir": is_dir, "size": size, "modified": modified})
+        entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+        return entries, ""
+
+    def _fill_container_rows(self, entries: list[dict], error: str) -> None:
+        tree = self._tree_widget(self.remote_tree)
+        container_id = self.container_context["id"]
+        base_path = self.container_context["path"]
+        for entry in entries:
+            full_path = posixpath.join(base_path, entry["name"])
+            tree.insert(
+                "",
+                "end",
+                iid=f"remote:ctrpath:{container_id}\x1f{full_path}",
+                text=entry["name"],
+                image=self.folder_icon if entry["is_dir"] else self.file_icon,
+                values=(
+                    "컨테이너 폴더" if entry["is_dir"] else "컨테이너 파일",
+                    "" if entry["is_dir"] else human_size(entry["size"]),
+                    entry["modified"],
+                ),
+            )
+        if error:
+            self.status.set(f"컨테이너 내부 목록을 가져오지 못했습니다: {error}")
+        else:
+            self.status.set(f"{self.container_context['name']} 컨테이너 내부: {self.container_context['path']}")
+
+    def _exec_with_sudo_fallback(self, command: str, timeout: float | None = None) -> tuple[bytes, str, int]:
+        """주어진 원격 명령을 실행하고, 'permission denied'로 실패하면
+        `sudo -n`(비밀번호 없는 sudo)으로 한 번 더 시도한다.
+        서버에 비밀번호 없는 sudo 권한이 설정되어 있지 않으면 sudo 재시도도
+        실패하며, 이 경우 최초 오류 메시지를 그대로 반환한다.
+        Returns (stdout_bytes, stderr_text, exit_code)."""
+        with self.sftp_lock:
+            stdin, stdout, stderr = self.client.exec_command(command, timeout=timeout)
+            stdin.close()
+            data = stdout.read()
+            err = stderr.read().decode("utf-8", errors="replace").strip()
+            exit_code = stdout.channel.recv_exit_status()
+        if exit_code != 0 and "permission denied" in err.lower():
+            sudo_command = f"sudo -n {command}"
+            with self.sftp_lock:
+                stdin, stdout, stderr = self.client.exec_command(sudo_command, timeout=timeout)
+                stdin.close()
+                sudo_data = stdout.read()
+                sudo_err = stderr.read().decode("utf-8", errors="replace").strip()
+                sudo_exit_code = stdout.channel.recv_exit_status()
+            if sudo_exit_code == 0:
+                return sudo_data, "", 0
+            combined_err = err
+            if sudo_err:
+                combined_err = f"{err} (sudo 재시도 실패: {sudo_err})"
+            return data, combined_err, exit_code
+        return data, err, exit_code
+
     def _fetch_docker_ps(self) -> tuple[list[dict], str]:
         """원격 서버에서 `docker ps` 결과를 가져온다. 실패해도 파일/디렉토리
         목록 표시는 계속되도록 예외를 삼키고 오류 메시지만 반환한다."""
         if not self.client:
             return [], ""
+        command = (
+            "docker ps --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'"
+        )
         try:
-            command = (
-                "docker ps --format '{{.ID}}\\t{{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}'"
-            )
-            with self.sftp_lock:
-                stdin, stdout, stderr = self.client.exec_command(command, timeout=10)
-                stdin.close()
-                output = stdout.read().decode("utf-8", errors="replace")
-                error_output = stderr.read().decode("utf-8", errors="replace").strip()
-                exit_code = stdout.channel.recv_exit_status()
+            data, error_output, exit_code = self._exec_with_sudo_fallback(command, timeout=10)
         except Exception as exc:
             return [], str(exc)
         if exit_code != 0:
             return [], error_output or f"docker ps 종료 코드: {exit_code}"
+        output = data.decode("utf-8", errors="replace")
         containers = []
         for line in output.splitlines():
             if not line.strip():
@@ -2167,21 +2288,131 @@ class DockerTransferDialog(FileTransferDialog):
             if not selected:
                 return
             item = selected[0]
-        if tree.exists(item) and tree.set(item, "type") == "컨테이너":
-            self.show_container_details(item)
+        if not tree.exists(item):
+            return
+        if item == "remote:ctrback:..":
+            self._exit_or_go_up_container()
+            return
+        kind = tree.set(item, "type")
+        if kind == "컨테이너":
+            self._enter_container(item)
+            return
+        if kind == "컨테이너 폴더":
+            self._enter_container_path(item)
+            return
+        if kind == "컨테이너 파일":
+            self._view_container_file(item)
             return
         super().open_remote_item(item)
+
+    def goto_remote_path(self) -> None:
+        if self.container_context is not None:
+            typed = self.remote_path_var.get().strip()
+            if not typed:
+                return
+            # "[Docker:이름] /path" 형태로 표시되므로 접두어가 있으면 제거하고 경로만 사용한다.
+            marker = "] "
+            marker_index = typed.find(marker)
+            path = typed[marker_index + len(marker):] if typed.startswith("[Docker:") and marker_index != -1 else typed
+            if not path.startswith("/"):
+                path = "/" + path
+            self.container_context["path"] = posixpath.normpath(path) or "/"
+            self.refresh_remote()
+            return
+        super().goto_remote_path()
+
+    def _enter_container(self, item: str) -> None:
+        container_id = self._container_id_from_item(item)
+        if not container_id:
+            return
+        name = self._tree_widget(self.remote_tree).item(item, "text")
+        self.container_context = {"id": container_id, "name": name, "path": "/"}
+        self.refresh_remote()
+
+    def _enter_container_path(self, item: str) -> None:
+        full_path = self._container_full_path_from_item(item)
+        if full_path is None or not self.container_context:
+            return
+        self.container_context["path"] = full_path
+        self.refresh_remote()
+
+    def _exit_or_go_up_container(self) -> None:
+        if not self.container_context:
+            self.refresh_remote()
+            return
+        current = self.container_context["path"]
+        if current in ("/", ""):
+            # 컨테이너 최상위 경로에서 다시 ".."을 누르면 컨테이너 목록(호스트 화면)으로 돌아간다.
+            self.container_context = None
+        else:
+            parent = posixpath.dirname(current.rstrip("/")) or "/"
+            self.container_context["path"] = parent
+        self.refresh_remote()
+
+    def _view_container_file(self, item: str) -> None:
+        full_path = self._container_full_path_from_item(item)
+        if full_path is None or not self.container_context:
+            return
+        container_id = self.container_context["id"]
+        name = self._tree_widget(self.remote_tree).item(item, "text")
+        self.status.set(f"{name} 파일을 읽는 중...")
+
+        def worker() -> None:
+            try:
+                inner_cmd = f"cat -- {shlex.quote(full_path)}"
+                command = f"docker exec {shlex.quote(container_id)} sh -c {shlex.quote(inner_cmd)}"
+                data, err, exit_code = self._exec_with_sudo_fallback(command, timeout=15)
+                if exit_code != 0:
+                    raise RuntimeError(err or f"cat 종료 코드: {exit_code}")
+            except Exception as exc:
+                detail = str(exc)
+                self.after(0, lambda: self._container_action_failed("컨테이너 파일 보기", detail))
+                return
+            self.after(
+                0,
+                lambda: (
+                    self.status.set(f"{self.container_context['name']} 컨테이너 내부: {self.container_context['path']}"),
+                    self.show_file_viewer(f"{name} (컨테이너 내부)", data),
+                ),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _container_full_path_from_item(self, item: str) -> str | None:
+        prefix = "remote:ctrpath:"
+        if not item.startswith(prefix):
+            return None
+        remainder = item[len(prefix):]
+        try:
+            _container_id, path = remainder.split("\x1f", 1)
+        except ValueError:
+            return None
+        return path
 
     def show_tree_menu(self, event, source: str) -> None:
         if source == "remote":
             tree = event.widget
             row = tree.identify_row(event.y)
-            if row and tree.set(row, "type") == "컨테이너":
+            kind = tree.set(row, "type") if row else ""
+            if row and kind == "컨테이너":
                 if row not in tree.selection():
                     tree.selection_set(row)
                 menu = tk.Menu(self, tearoff=0)
+                menu.add_command(label="폴더 열기", command=lambda: self.open_remote_item(row))
                 menu.add_command(label="컨테이너 정보 보기", command=lambda: self.show_container_details(row))
                 menu.add_command(label="로그 보기(docker logs)", command=lambda: self.view_container_logs(row))
+                menu.add_command(label="새로 고침", command=self.refresh_remote)
+                try:
+                    menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    menu.grab_release()
+                return
+            if row and kind in ("컨테이너 폴더", "컨테이너 파일"):
+                if row not in tree.selection():
+                    tree.selection_set(row)
+                menu = tk.Menu(self, tearoff=0)
+                label = "열기" if kind == "컨테이너 폴더" else "파일 보기"
+                menu.add_command(label=label, command=lambda: self.open_remote_item(row))
                 menu.add_command(label="새로 고침", command=self.refresh_remote)
                 try:
                     menu.tk_popup(event.x_root, event.y_root)
@@ -2200,13 +2431,9 @@ class DockerTransferDialog(FileTransferDialog):
         def worker() -> None:
             try:
                 command = f"docker inspect {shlex.quote(container_id)}"
-                stdin, stdout, stderr = self.client.exec_command(command)
-                stdin.close()
-                data = stdout.read()
-                error = stderr.read().decode("utf-8", errors="replace").strip()
-                exit_code = stdout.channel.recv_exit_status()
+                data, err, exit_code = self._exec_with_sudo_fallback(command)
                 if exit_code != 0:
-                    raise RuntimeError(error or f"docker inspect 종료 코드: {exit_code}")
+                    raise RuntimeError(err or f"docker inspect 종료 코드: {exit_code}")
             except Exception as exc:
                 detail = str(exc)
                 self.after(0, lambda: self._container_action_failed("컨테이너 정보 조회", detail))
@@ -2224,14 +2451,13 @@ class DockerTransferDialog(FileTransferDialog):
 
         def worker() -> None:
             try:
-                command = f"docker logs --tail 300 {shlex.quote(container_id)} 2>&1"
-                stdin, stdout, stderr = self.client.exec_command(command)
-                stdin.close()
-                data = stdout.read()
-                exit_code = stdout.channel.recv_exit_status()
-                if exit_code != 0 and not data:
-                    error = stderr.read().decode("utf-8", errors="replace").strip()
-                    raise RuntimeError(error or f"docker logs 종료 코드: {exit_code}")
+                command = f"docker logs --tail 300 {shlex.quote(container_id)}"
+                data, err, exit_code = self._exec_with_sudo_fallback(command)
+                if exit_code != 0:
+                    raise RuntimeError(err or f"docker logs 종료 코드: {exit_code}")
+                if err:
+                    # docker logs는 컨테이너의 stderr 출력도 함께 전달하므로 이어서 표시한다.
+                    data = data + b"\n" + err.encode("utf-8", errors="replace")
             except Exception as exc:
                 detail = str(exc)
                 self.after(0, lambda: self._container_action_failed("컨테이너 로그 조회", detail))
