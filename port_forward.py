@@ -198,6 +198,45 @@ def get_wsl2_ip():
     return out.split()[0].strip()
 
 
+def get_wsl_distro_list() -> tuple[int, str]:
+    """`wsl -l -v` 결과를 조회하여 (returncode, 출력문자열) 로 반환.
+
+    wsl.exe는 콘솔로 리다이렉트될 때 UTF-16LE로 출력하는 경우가 많아
+    (subprocess text=cp949 로 그대로 읽으면 글자가 깨짐) 바이트를 직접 받아
+    NUL 바이트 비율로 UTF-16LE 여부를 판단한 뒤 적절히 디코딩한다.
+    """
+    _log_command("wsl -l -v")
+    try:
+        result = subprocess.run(
+            ["wsl", "-l", "-v"],
+            capture_output=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+    except Exception as e:
+        return -1, str(e)
+
+    def decode(b: bytes) -> str:
+        if not b:
+            return ""
+        if b.count(b"\x00") > len(b) // 4:
+            try:
+                return b.decode("utf-16-le", errors="ignore")
+            except Exception:
+                pass
+        for enc in ("utf-8", "cp949"):
+            try:
+                return b.decode(enc, errors="ignore")
+            except Exception:
+                continue
+        return b.decode(errors="ignore")
+
+    out = decode(result.stdout).strip()
+    err = decode(result.stderr).strip()
+    if result.returncode != 0 and not out:
+        out = err
+    return result.returncode, out
+
+
 # ------------------------------------------------------------------
 # WSL2 mirrored 네트워킹 모드 확인
 # ------------------------------------------------------------------
@@ -1313,26 +1352,51 @@ class PortForwardApp(tk.Tk):
             messagebox.showinfo("안내", "먼저 '상태 새로고침'을 눌러 확인해주세요.")
             return
 
-        wsl_iface_lines = "\n  ".join(
-            f"{iface}: {ip}" for iface, ip in detail["wsl_interfaces"]
-        ) or "(없음)"
+        self.set_status("wsl -l -v 조회 중...")
 
-        msg = (
-            f"[.wslconfig]\n"
-            f"  networkingMode = {detail['wslconfig_mode']}\n"
-            f"  mirrored 설정 여부 : {'예' if detail['configured'] else '아니오'}\n\n"
-            f"[Windows 호스트 IPv4 목록 (ipconfig)]\n"
-            f"  " + ("\n  ".join(detail["windows_ips"]) or "(없음)") + "\n\n"
-            f"[WSL2 인터페이스 (ip a)]\n"
-            f"  {wsl_iface_lines}\n\n"
-            f"[공통 IP - 미러링 동작 여부 판단]\n"
-            f"  " + ("\n  ".join(detail["common_ips"]) or "(없음, 미러링 미동작)")
-        )
-        messagebox.showinfo("Mirrored 네트워킹 상세", msg)
+        def worker():
+            return get_wsl_distro_list()
+
+        def done(result):
+            code, out = result
+            self.set_status("준비됨")
+
+            wsl_iface_lines = "\n  ".join(
+                f"{iface}: {ip}" for iface, ip in detail["wsl_interfaces"]
+            ) or "(없음)"
+
+            msg = (
+                f"[.wslconfig]\n"
+                f"  networkingMode = {detail['wslconfig_mode']}\n"
+                f"  mirrored 설정 여부 : {'예' if detail['configured'] else '아니오'}\n\n"
+                f"[Windows 호스트 IPv4 목록 (ipconfig)]\n"
+                f"  " + ("\n  ".join(detail["windows_ips"]) or "(없음)") + "\n\n"
+                f"[WSL2 인터페이스 (ip a)]\n"
+                f"  {wsl_iface_lines}\n\n"
+                f"[공통 IP - 미러링 동작 여부 판단]\n"
+                f"  " + ("\n  ".join(detail["common_ips"]) or "(없음, 미러링 미동작)") + "\n\n"
+                f"[wsl -l -v]\n"
+                + (out if out else "(결과 없음)")
+            )
+
+            win = tk.Toplevel(self)
+            win.title("Mirrored 네트워킹 상세")
+            win.geometry("580x520")
+            win.transient(self)
+
+            text = tk.Text(win, wrap="word", font=("Consolas", 10))
+            text.pack(fill="both", expand=True, padx=6, pady=6)
+            text.insert("1.0", msg)
+            text.config(state="disabled")
+
+            ttk.Button(win, text="닫기", command=win.destroy).pack(pady=(0, 8))
+
+        self.run_bg(worker, on_done=done)
 
     # ---------------- 포트 점유 관리 ----------------
     def refresh_ports(self):
         self.set_status("LISTENING 포트 조회 중...")
+
 
         def worker():
             return get_listening_ports_with_process()
