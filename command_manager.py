@@ -2540,13 +2540,15 @@ class DockerTransferDialog(FileTransferDialog):
         self._download_docker_items(sources, local_folder)
 
     def _download_docker_items(self, sources: list[dict], local_folder: Path) -> None:
-        self.status.set("Docker 항목을 다운로드하는 중...")
+        total_items = len(sources)
+        self.status.set(f"Docker 항목 다운로드 준비 중... (0/{total_items})")
+        self._set_progress_mode("indeterminate")
 
         def worker() -> None:
             results = []
-            for info in sources:
+            for index, info in enumerate(sources, start=1):
                 try:
-                    saved_path = self._download_one_docker_item(info, local_folder)
+                    saved_path = self._download_one_docker_item(info, local_folder, index, total_items)
                     results.append((info["name"], True, str(saved_path)))
                 except Exception as exc:
                     results.append((info["name"], False, str(exc)))
@@ -2554,10 +2556,14 @@ class DockerTransferDialog(FileTransferDialog):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _download_one_docker_item(self, info: dict, local_folder: Path) -> Path:
+    def _download_one_docker_item(self, info: dict, local_folder: Path, index: int, total: int) -> Path:
         container_id = info["container_id"]
         remote_source_path = info["path"]
-        safe_name = re.sub(r'[\\/:*?"<>|]', "_", info["name"] or container_id)
+        name = info["name"] or container_id
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", name)
+        label = f"({index}/{total}) {name}"
+
+        self.after(0, lambda: (self._set_progress_mode("indeterminate"), self.status.set(f"{label}: 원격 서버에서 준비 중 (docker export/cp 실행)...")))
 
         tmp_dir = self._make_remote_tempdir()
         try:
@@ -2568,20 +2574,33 @@ class DockerTransferDialog(FileTransferDialog):
                     f"docker export {shlex.quote(container_id)} -o {shlex.quote(remote_archive)}",
                     timeout=None,
                 )
-                local_target = self._unique_local_path(local_folder / archive_name)
                 with self.sftp_lock:
-                    self.sftp.get(remote_archive, str(local_target))
+                    remote_size = max(1, self.sftp.stat(remote_archive).st_size)
+                local_target = self._unique_local_path(local_folder / archive_name)
+                self.after(0, lambda: self._set_progress_mode("determinate"))
+
+                def callback(transferred: int, _total: int) -> None:
+                    percent = min(100, (transferred / remote_size) * 100)
+                    self.after(0, lambda value=percent: self._update_progress(value, f"{label}: 다운로드 중"))
+
+                with self.sftp_lock:
+                    self.sftp.get(remote_archive, str(local_target), callback=callback)
             else:
                 remote_dest = posixpath.join(tmp_dir, safe_name)
                 self._run_remote_ok(
                     f"docker cp {shlex.quote(container_id + ':' + remote_source_path)} {shlex.quote(remote_dest)}",
                     timeout=None,
                 )
-                local_target = self._unique_local_path(local_folder / safe_name)
                 with self.sftp_lock:
-                    self._sftp_download_recursive(self.sftp, remote_dest, local_target)
+                    total_size = max(1, self._sftp_total_size(self.sftp, remote_dest))
+                local_target = self._unique_local_path(local_folder / safe_name)
+                self.after(0, lambda: self._set_progress_mode("determinate"))
+                progress_state = {"done": 0, "label": f"{label}: 다운로드 중"}
+                with self.sftp_lock:
+                    self._sftp_download_recursive(self.sftp, remote_dest, local_target, total_size, progress_state)
         finally:
             self._run_remote_best_effort(f"rm -rf {shlex.quote(tmp_dir)}")
+        self.after(0, lambda: self._update_progress(100, f"{label}: 완료"))
         return local_target
 
     def _make_remote_tempdir(self) -> str:
@@ -2604,7 +2623,47 @@ class DockerTransferDialog(FileTransferDialog):
         except Exception:
             pass
 
-    def _sftp_download_recursive(self, sftp, remote_path: str, local_path: Path) -> None:
+    def _set_progress_mode(self, mode: str) -> None:
+        """진행률 바를 '준비 중'(원격 docker 명령 실행 동안, 바이트 단위 진행을 알 수 없음)을
+        나타내는 indeterminate 모드와, 실제 SFTP 전송량을 %로 보여주는 determinate 모드
+        사이에서 전환한다."""
+        if mode == "indeterminate":
+            self.progress_bar.configure(mode="indeterminate")
+            self.progress_bar.start(12)
+            self.progress_text_var.set("...")
+        else:
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate")
+            self.progress_var.set(0)
+            self.progress_text_var.set("0%")
+
+    def _update_progress(self, percent: float, label: str) -> None:
+        rounded = int(round(percent))
+        self.progress_var.set(percent)
+        self.progress_text_var.set(f"{rounded}%")
+        self.status.set(f"{label} ({rounded}%)")
+
+    def _sftp_total_size(self, sftp, remote_path: str) -> int:
+        attrs = sftp.stat(remote_path)
+        if stat.S_ISDIR(attrs.st_mode):
+            total = 0
+            for entry in sftp.listdir_attr(remote_path):
+                child = posixpath.join(remote_path, entry.filename)
+                if stat.S_ISDIR(entry.st_mode):
+                    total += self._sftp_total_size(sftp, child)
+                else:
+                    total += entry.st_size
+            return total
+        return attrs.st_size
+
+    def _sftp_download_recursive(
+        self,
+        sftp,
+        remote_path: str,
+        local_path: Path,
+        total_size: int,
+        progress_state: dict,
+    ) -> None:
         attrs = sftp.stat(remote_path)
         if stat.S_ISDIR(attrs.st_mode):
             local_path.mkdir(parents=True, exist_ok=True)
@@ -2612,12 +2671,32 @@ class DockerTransferDialog(FileTransferDialog):
                 child_remote = posixpath.join(remote_path, entry.filename)
                 child_local = local_path / entry.filename
                 if stat.S_ISDIR(entry.st_mode):
-                    self._sftp_download_recursive(sftp, child_remote, child_local)
+                    self._sftp_download_recursive(sftp, child_remote, child_local, total_size, progress_state)
                 else:
-                    sftp.get(child_remote, str(child_local))
+                    base = progress_state["done"]
+
+                    def callback(transferred: int, _total: int, base: int = base) -> None:
+                        percent = min(100, ((base + transferred) / total_size) * 100)
+                        self.after(
+                            0,
+                            lambda value=percent: self._update_progress(value, progress_state.get("label", "다운로드 중")),
+                        )
+
+                    sftp.get(child_remote, str(child_local), callback=callback)
+                    progress_state["done"] = base + entry.st_size
         else:
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            sftp.get(remote_path, str(local_path))
+            base = progress_state["done"]
+
+            def callback(transferred: int, _total: int, base: int = base) -> None:
+                percent = min(100, ((base + transferred) / total_size) * 100)
+                self.after(
+                    0,
+                    lambda value=percent: self._update_progress(value, progress_state.get("label", "다운로드 중")),
+                )
+
+            sftp.get(remote_path, str(local_path), callback=callback)
+            progress_state["done"] = base + attrs.st_size
 
     def _unique_local_path(self, path: Path) -> Path:
         if not path.exists():
@@ -2631,10 +2710,13 @@ class DockerTransferDialog(FileTransferDialog):
             counter += 1
 
     def _docker_download_done(self, results: list[tuple[str, bool, str]]) -> None:
+        self._set_progress_mode("determinate")
         self.refresh_local()
         success = [r for r in results if r[1]]
         failed = [r for r in results if not r[1]]
         if success and not failed:
+            self.progress_var.set(100)
+            self.progress_text_var.set("100%")
             names = ", ".join(r[0] for r in success)
             self.status.set(f"Docker 항목 다운로드 완료: {names}")
             messagebox.showinfo("다운로드 완료", f"{names} 다운로드가 완료되었습니다.", parent=self)
