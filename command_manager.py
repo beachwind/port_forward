@@ -2470,6 +2470,186 @@ class DockerTransferDialog(FileTransferDialog):
         self.status.set(f"{action} 실패: {detail}")
         messagebox.showerror(action, detail, parent=self)
 
+    # ------------------------------------------------------------------
+    # Docker 컨테이너 / 컨테이너 내부 폴더·파일을 로컬로 드래그하여 다운로드
+    # ------------------------------------------------------------------
+    def start_drag(self, event, source: str) -> None:
+        if source == "remote":
+            tree = event.widget
+            item = tree.identify_row(event.y)
+            if item and self._docker_drag_source(item) is not None:
+                selected = list(tree.selection())
+                if item not in selected:
+                    tree.selection_set(item)
+                    selected = [item]
+                docker_items = [sel for sel in selected if self._docker_drag_source(sel) is not None]
+                self.drag_data = {"source": "remote_docker", "items": docker_items}
+                return
+        super().start_drag(event, source)
+
+    def finish_drag(self, event) -> None:
+        if self.drag_data and self.drag_data.get("source") == "remote_docker":
+            items = self.drag_data["items"]
+            self.drag_data = None
+            local_tree = self._tree_widget(self.local_tree)
+            target_tree = self._drop_tree_at_pointer(event.x_root, event.y_root)
+            if target_tree != local_tree:
+                return
+            local_folder = self._drop_local_folder(local_tree, event.x_root, event.y_root) or self.local_cwd
+            self._confirm_and_download_docker_items(items, local_folder)
+            return
+        super().finish_drag(event)
+
+    def _docker_drag_source(self, item: str) -> dict | None:
+        """드래그 중인 원격 항목이 Docker 컨테이너/컨테이너 폴더/파일이면
+        다운로드에 필요한 정보를 담은 dict를, 아니면 None을 반환한다."""
+        tree = self._tree_widget(self.remote_tree)
+        if not tree.exists(item) or item in ("remote:..", "remote:ctrback:.."):
+            return None
+        kind = tree.set(item, "type")
+        name = tree.item(item, "text")
+        if kind == "컨테이너":
+            container_id = self._container_id_from_item(item)
+            if not container_id:
+                return None
+            return {"container_id": container_id, "path": "/", "name": name, "whole_container": True}
+        if kind in ("컨테이너 폴더", "컨테이너 파일"):
+            prefix = "remote:ctrpath:"
+            full_path = self._container_full_path_from_item(item)
+            if full_path is None or not item.startswith(prefix):
+                return None
+            container_id = item[len(prefix):].split("\x1f", 1)[0]
+            return {"container_id": container_id, "path": full_path, "name": name, "whole_container": False}
+        return None
+
+    def _confirm_and_download_docker_items(self, items: list[str], local_folder: Path) -> None:
+        sources = [info for item in items if (info := self._docker_drag_source(item))]
+        if not sources:
+            return
+        names = ", ".join(info["name"] for info in sources)
+        if any(info["whole_container"] for info in sources):
+            message = (
+                f"{names} 항목을 {local_folder} 폴더로 다운로드할까요?\n\n"
+                "컨테이너 전체를 내려받는 경우 tar 압축 파일(docker export)로 저장되며,\n"
+                "컨테이너 크기에 따라 시간이 오래 걸릴 수 있습니다."
+            )
+        else:
+            message = f"{names} 항목을 {local_folder} 폴더로 다운로드할까요?"
+        if not messagebox.askyesno("Docker 다운로드", message, parent=self):
+            return
+        self._download_docker_items(sources, local_folder)
+
+    def _download_docker_items(self, sources: list[dict], local_folder: Path) -> None:
+        self.status.set("Docker 항목을 다운로드하는 중...")
+
+        def worker() -> None:
+            results = []
+            for info in sources:
+                try:
+                    saved_path = self._download_one_docker_item(info, local_folder)
+                    results.append((info["name"], True, str(saved_path)))
+                except Exception as exc:
+                    results.append((info["name"], False, str(exc)))
+            self.after(0, lambda: self._docker_download_done(results))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_one_docker_item(self, info: dict, local_folder: Path) -> Path:
+        container_id = info["container_id"]
+        remote_source_path = info["path"]
+        safe_name = re.sub(r'[\\/:*?"<>|]', "_", info["name"] or container_id)
+
+        tmp_dir = self._make_remote_tempdir()
+        try:
+            if info["whole_container"]:
+                archive_name = f"{safe_name}.tar"
+                remote_archive = posixpath.join(tmp_dir, archive_name)
+                self._run_remote_ok(
+                    f"docker export {shlex.quote(container_id)} -o {shlex.quote(remote_archive)}",
+                    timeout=None,
+                )
+                local_target = self._unique_local_path(local_folder / archive_name)
+                with self.sftp_lock:
+                    self.sftp.get(remote_archive, str(local_target))
+            else:
+                remote_dest = posixpath.join(tmp_dir, safe_name)
+                self._run_remote_ok(
+                    f"docker cp {shlex.quote(container_id + ':' + remote_source_path)} {shlex.quote(remote_dest)}",
+                    timeout=None,
+                )
+                local_target = self._unique_local_path(local_folder / safe_name)
+                with self.sftp_lock:
+                    self._sftp_download_recursive(self.sftp, remote_dest, local_target)
+        finally:
+            self._run_remote_best_effort(f"rm -rf {shlex.quote(tmp_dir)}")
+        return local_target
+
+    def _make_remote_tempdir(self) -> str:
+        data, err, exit_code = self._exec_with_sudo_fallback("mktemp -d /tmp/cmgr_docker_XXXXXX", timeout=15)
+        if exit_code != 0:
+            raise RuntimeError(err or "임시 디렉터리를 만들 수 없습니다.")
+        path = data.decode("utf-8", errors="replace").strip()
+        if not path:
+            raise RuntimeError("임시 디렉터리 경로를 확인할 수 없습니다.")
+        return path
+
+    def _run_remote_ok(self, command: str, timeout: float | None = None) -> None:
+        data, err, exit_code = self._exec_with_sudo_fallback(command, timeout=timeout)
+        if exit_code != 0:
+            raise RuntimeError(err or f"명령 실행에 실패했습니다 (종료 코드 {exit_code}).")
+
+    def _run_remote_best_effort(self, command: str) -> None:
+        try:
+            self.client.exec_command(command)
+        except Exception:
+            pass
+
+    def _sftp_download_recursive(self, sftp, remote_path: str, local_path: Path) -> None:
+        attrs = sftp.stat(remote_path)
+        if stat.S_ISDIR(attrs.st_mode):
+            local_path.mkdir(parents=True, exist_ok=True)
+            for entry in sftp.listdir_attr(remote_path):
+                child_remote = posixpath.join(remote_path, entry.filename)
+                child_local = local_path / entry.filename
+                if stat.S_ISDIR(entry.st_mode):
+                    self._sftp_download_recursive(sftp, child_remote, child_local)
+                else:
+                    sftp.get(child_remote, str(child_local))
+        else:
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            sftp.get(remote_path, str(local_path))
+
+    def _unique_local_path(self, path: Path) -> Path:
+        if not path.exists():
+            return path
+        stem, suffix = path.stem, path.suffix
+        counter = 1
+        while True:
+            candidate = path.with_name(f"{stem} ({counter}){suffix}")
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
+    def _docker_download_done(self, results: list[tuple[str, bool, str]]) -> None:
+        self.refresh_local()
+        success = [r for r in results if r[1]]
+        failed = [r for r in results if not r[1]]
+        if success and not failed:
+            names = ", ".join(r[0] for r in success)
+            self.status.set(f"Docker 항목 다운로드 완료: {names}")
+            messagebox.showinfo("다운로드 완료", f"{names} 다운로드가 완료되었습니다.", parent=self)
+        elif success and failed:
+            ok_names = ", ".join(r[0] for r in success)
+            fail_detail = "\n".join(f"- {r[0]}: {r[2]}" for r in failed)
+            self.status.set(f"일부 항목 다운로드 실패 ({len(failed)}건)")
+            messagebox.showwarning(
+                "일부 실패", f"성공: {ok_names}\n\n실패:\n{fail_detail}", parent=self
+            )
+        else:
+            fail_detail = "\n".join(f"- {r[0]}: {r[2]}" for r in failed)
+            self.status.set("Docker 항목 다운로드 실패")
+            messagebox.showerror("다운로드 실패", fail_detail, parent=self)
+
 
 class CommandSettingsDialog(tk.Toplevel):
     def __init__(
