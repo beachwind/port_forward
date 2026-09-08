@@ -2492,7 +2492,36 @@ class DockerTransferDialog(FileTransferDialog):
         if not container_id:
             return
         name = self._tree_widget(self.remote_tree).item(item, "text")
-        self.container_context = {"id": container_id, "name": name, "path": "/"}
+        self.status.set(f"{name} 컨테이너 진입 준비 중 (WORKDIR 확인)...")
+
+        def worker() -> None:
+            workdir = self._fetch_container_workdir(container_id)
+            self.after(0, lambda: self._enter_container_at(container_id, name, workdir))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _fetch_container_workdir(self, container_id: str) -> str:
+        """컨테이너 이미지에 설정된 WORKDIR을 조회한다.
+        (docker exec -it <id> /bin/sh 로 접속했을 때 셸이 시작되는 경로와 동일)
+        조회에 실패하거나 값이 비어 있으면 컨테이너 루트('/')를 기본값으로 사용한다."""
+        if not self.client:
+            return "/"
+        command = "docker inspect --format '{{.Config.WorkingDir}}' " + shlex.quote(container_id)
+        try:
+            data, _err, exit_code = self._exec_with_sudo_fallback(command, timeout=15)
+        except Exception:
+            return "/"
+        if exit_code != 0:
+            return "/"
+        workdir = data.decode("utf-8", errors="replace").strip()
+        if not workdir:
+            return "/"
+        if not workdir.startswith("/"):
+            workdir = "/" + workdir
+        return posixpath.normpath(workdir) or "/"
+
+    def _enter_container_at(self, container_id: str, name: str, path: str) -> None:
+        self.container_context = {"id": container_id, "name": name, "path": path}
         self.refresh_remote()
 
     def _enter_container_path(self, item: str) -> None:
@@ -2555,6 +2584,90 @@ class DockerTransferDialog(FileTransferDialog):
             return None
         return path
 
+    def _selected_container_item(self) -> str | None:
+        tree = self._tree_widget(self.remote_tree)
+        selected = tree.selection()
+        if not selected:
+            return None
+        item = selected[0]
+        if self._container_full_path_from_item(item) is None:
+            return None
+        return item
+
+    def delete_container_selected(self, item: str | None = None) -> None:
+        """컨테이너 내부 파일/폴더를 docker exec 로 삭제한다. (rm -rf)"""
+        if item is None:
+            item = self._selected_container_item()
+        if not item:
+            messagebox.showinfo("선택 필요", "삭제할 컨테이너 내부 항목을 선택하세요.", parent=self)
+            return
+        full_path = self._container_full_path_from_item(item)
+        if full_path is None or not self.container_context:
+            return
+        container_id = self.container_context["id"]
+        tree = self._tree_widget(self.remote_tree)
+        name = tree.item(item, "text")
+        if not messagebox.askyesno(
+            "삭제 확인",
+            f"'{name}' 항목을 컨테이너 내부에서 삭제할까요?\n(docker exec ... rm -rf {full_path})",
+            parent=self,
+        ):
+            return
+        self.status.set(f"{name} 항목을 컨테이너에서 삭제하는 중...")
+
+        def worker() -> None:
+            try:
+                inner_cmd = f"rm -rf -- {shlex.quote(full_path)}"
+                command = f"docker exec {shlex.quote(container_id)} sh -c {shlex.quote(inner_cmd)}"
+                self._run_remote_ok(command, timeout=30)
+            except Exception as exc:
+                detail = str(exc)
+                self.after(0, lambda: self._container_action_failed("컨테이너 항목 삭제", detail))
+                return
+            self.after(0, lambda: (self.refresh_remote(), self.status.set(f"{name} 항목을 삭제했습니다.")))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def rename_container_selected(self, item: str | None = None) -> None:
+        """컨테이너 내부 파일/폴더 이름을 docker exec 로 변경한다. (mv)"""
+        if item is None:
+            item = self._selected_container_item()
+        if not item:
+            messagebox.showinfo("선택 필요", "이름을 변경할 컨테이너 내부 항목을 선택하세요.", parent=self)
+            return
+        full_path = self._container_full_path_from_item(item)
+        if full_path is None or not self.container_context:
+            return
+        container_id = self.container_context["id"]
+        tree = self._tree_widget(self.remote_tree)
+        current_name = tree.item(item, "text")
+        new_name = simpledialog.askstring(
+            "이름 변경", "새 파일명/폴더명을 입력하세요.", initialvalue=current_name, parent=self
+        )
+        if not new_name or new_name == current_name:
+            return
+        if "/" in new_name:
+            messagebox.showerror("이름 변경 실패", "파일명/폴더명에는 '/' 를 포함할 수 없습니다.", parent=self)
+            return
+        dest_path = posixpath.join(posixpath.dirname(full_path), new_name)
+        self.status.set(f"{current_name} 이름을 변경하는 중...")
+
+        def worker() -> None:
+            try:
+                inner_cmd = f"mv -- {shlex.quote(full_path)} {shlex.quote(dest_path)}"
+                command = f"docker exec {shlex.quote(container_id)} sh -c {shlex.quote(inner_cmd)}"
+                self._run_remote_ok(command, timeout=30)
+            except Exception as exc:
+                detail = str(exc)
+                self.after(0, lambda: self._container_action_failed("컨테이너 항목 이름 변경", detail))
+                return
+            self.after(
+                0,
+                lambda: (self.refresh_remote(), self.status.set(f"'{current_name}' 이름을 '{new_name}'(으)로 변경했습니다.")),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def show_tree_menu(self, event, source: str) -> None:
         if source == "remote":
             tree = event.widget
@@ -2586,6 +2699,10 @@ class DockerTransferDialog(FileTransferDialog):
                 label = "열기" if kind == "컨테이너 폴더" else "파일 보기"
                 menu.add_command(label=label, command=lambda: self.open_remote_item(row))
                 menu.add_command(label="탐색 기록 보기(폴더/파일 목록)", command=lambda: self.view_container_explore_log())
+                menu.add_separator()
+                menu.add_command(label="이름 변경", command=lambda: self.rename_container_selected(row))
+                menu.add_command(label="삭제", command=lambda: self.delete_container_selected(row))
+                menu.add_separator()
                 menu.add_command(label="새로 고침", command=self.refresh_remote)
                 try:
                     menu.tk_popup(event.x_root, event.y_root)
@@ -2907,6 +3024,9 @@ class DockerTransferDialog(FileTransferDialog):
                     self.drag_data = None
                     self._confirm_and_upload_to_container(items, docker_target)
                     return
+                if self.container_context is not None:
+                    self.drag_data = None
+                    return
         super().finish_drag(event)
 
     def _docker_drop_target(self, tree: ttk.Treeview, x_root: int, y_root: int) -> dict | None:
@@ -2933,6 +3053,18 @@ class DockerTransferDialog(FileTransferDialog):
                     "container_id": container_id,
                     "path": full_path,
                     "name": posixpath.basename(full_path) or full_path,
+                }
+            if kind == "컨테이너 파일":
+                prefix = "remote:ctrpath:"
+                full_path = self._container_full_path_from_item(row)
+                if full_path is None or not row.startswith(prefix):
+                    return None
+                container_id = row[len(prefix):].split("\x1f", 1)[0]
+                parent_path = posixpath.dirname(full_path.rstrip("/")) or "/"
+                return {
+                    "container_id": container_id,
+                    "path": parent_path,
+                    "name": posixpath.basename(parent_path) or parent_path,
                 }
             return None
         # 특정 행이 아니라 빈 영역에 드롭한 경우: 현재 컨테이너 내부를 탐색 중이면
