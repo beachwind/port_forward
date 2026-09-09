@@ -966,6 +966,7 @@ class PortForwardApp(tk.Tk):
         bottom.pack(fill="x")
 
         ttk.Button(bottom, text="선택 규칙 삭제", command=self.delete_selected).pack(side="left", padx=4)
+        ttk.Button(bottom, text="선택 규칙 수정", command=self.open_edit_dialog).pack(side="left", padx=4)
         ttk.Button(bottom, text="선택 규칙 재적용", command=self.reapply_selected).pack(side="left", padx=4)
         ttk.Button(bottom, text="전체 규칙 재적용", command=self.reapply_all).pack(side="left", padx=4)
         ttk.Button(bottom, text="선택 규칙 명령어 변환", command=self.convert_selected_to_command).pack(side="left", padx=4)
@@ -1871,6 +1872,153 @@ class PortForwardApp(tk.Tk):
             self.run_bg(worker, on_done=done)
 
         ttk.Button(dialog, text="등록", command=submit).pack(pady=10)
+
+    # ---------------- 규칙 수정 ----------------
+    def open_edit_dialog(self):
+        """'새 규칙 추가' 팝업과 동일한 구성으로, 선택된 규칙의 기존 값을 채워서 보여주고
+        수정할 수 있게 한다. 확인 시 기존 portproxy(및 방화벽) 규칙을 삭제한 뒤
+        새 값으로 다시 등록하고, 저장된 규칙 목록도 갱신한다."""
+        rule = self.get_selected_rule()
+        if not rule:
+            messagebox.showinfo("안내", "수정할 규칙을 목록에서 선택해주세요.")
+            return
+
+        old_listenaddress = rule["listenaddress"]
+        old_listenport = rule["listenport"]
+
+        dialog = tk.Toplevel(self)
+        dialog.title("포트 포워딩 수정")
+        dialog.geometry("400x320")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        fields = {}
+
+        def add_row(label, key, default=""):
+            row = ttk.Frame(dialog, padding=(10, 6))
+            row.pack(fill="x")
+            ttk.Label(row, text=label, width=16).pack(side="left")
+            entry = ttk.Entry(row)
+            entry.insert(0, default)
+            entry.pack(side="left", fill="x", expand=True)
+            fields[key] = entry
+
+        add_row("대기 IP", "listenaddress", rule["listenaddress"])
+        add_row("대기 포트", "listenport", str(rule["listenport"]))
+        add_row("대상 IP", "connectaddress", rule["connectaddress"])
+        add_row("대상 포트", "connectport", str(rule["connectport"]))
+        add_row("메모(선택)", "note", rule.get("note", ""))
+
+        def detect_wsl_ip():
+            self.set_status("WSL2 IP 확인 중...")
+
+            def done(ip):
+                self.set_status("준비됨")
+                if ip:
+                    fields["connectaddress"].delete(0, "end")
+                    fields["connectaddress"].insert(0, ip)
+                else:
+                    messagebox.showwarning("WSL2 IP", "WSL2 IP를 가져오지 못했습니다.\nWSL이 설치/실행 중인지 확인하세요.")
+
+            self.run_bg(get_wsl2_ip, on_done=done)
+
+        ttk.Button(dialog, text="WSL2 내부 IP 자동 감지 → 대상 IP에 채우기", command=detect_wsl_ip).pack(pady=6)
+
+        fw_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            dialog,
+            text="방화벽 인바운드 규칙도 함께 갱신 (기존 규칙 삭제 후 재생성)",
+            variable=fw_var,
+        ).pack(pady=4)
+
+        def submit():
+            try:
+                new_listenport = int(fields["listenport"].get().strip())
+                new_connectport = int(fields["connectport"].get().strip())
+            except ValueError:
+                messagebox.showerror("입력 오류", "포트 번호는 숫자로 입력해주세요.")
+                return
+
+            new_listenaddress = fields["listenaddress"].get().strip() or "0.0.0.0"
+            new_connectaddress = fields["connectaddress"].get().strip()
+            new_note = fields["note"].get().strip()
+
+            if not new_connectaddress:
+                messagebox.showerror("입력 오류", "대상 IP를 입력해주세요.")
+                return
+
+            update_fw = fw_var.get()
+            dialog.destroy()
+            self.set_status("포트 포워딩 수정 중...")
+
+            def worker():
+                # netsh portproxy는 수정(update) 개념이 없으므로 기존 규칙을 지우고 새로 등록한다.
+                # (이미 없어졌을 수도 있으므로 실패해도 무시하고 계속 진행)
+                delete_portproxy(old_listenport, old_listenaddress)
+
+                if update_fw:
+                    delete_firewall_rule(f"PortForward_{old_listenport}")
+
+                code, out, err = add_portproxy(
+                    new_listenport, new_connectport, new_connectaddress, new_listenaddress
+                )
+                fw_result = None
+                if code == 0 and update_fw:
+                    fw_result = add_firewall_rule(f"PortForward_{new_listenport}", new_listenport)
+                return code, out, err, update_fw, fw_result
+
+            def done(result):
+                code, out, err, update_fw, fw_result = result
+                self.set_status("준비됨")
+                if code != 0:
+                    messagebox.showerror("실패", f"포트 포워딩 수정 실패:\n{err or out}")
+                    return
+
+                # 저장된 규칙 목록에서 원래 항목을 찾아 새 값으로 교체
+                rules = load_rules()
+                for r in rules:
+                    if (
+                        r.get("listenaddress") == old_listenaddress
+                        and r.get("listenport") == old_listenport
+                        and r.get("connectaddress") == rule["connectaddress"]
+                        and r.get("connectport") == rule["connectport"]
+                        and r.get("note", "") == rule.get("note", "")
+                        and r.get("created_at", "") == rule.get("created_at", "")
+                    ):
+                        r["listenaddress"] = new_listenaddress
+                        r["listenport"] = new_listenport
+                        r["connectaddress"] = new_connectaddress
+                        r["connectport"] = new_connectport
+                        r["note"] = new_note
+                        break
+                else:
+                    # 저장 파일과 그리드가 어긋나 원래 항목을 못 찾은 경우, 새 항목으로 추가
+                    rules.append({
+                        "listenaddress": new_listenaddress,
+                        "listenport": new_listenport,
+                        "connectaddress": new_connectaddress,
+                        "connectport": new_connectport,
+                        "note": new_note,
+                        "created_at": rule.get("created_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+                save_rules(rules)
+                self.refresh_table()
+
+                msg = (
+                    f"{old_listenaddress}:{old_listenport} -> "
+                    f"{new_listenaddress}:{new_listenport} (대상 {new_connectaddress}:{new_connectport}) 수정 완료"
+                )
+                if update_fw and fw_result:
+                    fcode, fout, ferr = fw_result
+                    if fcode == 0:
+                        msg += f"\n방화벽 규칙 'PortForward_{new_listenport}' 갱신 완료"
+                    else:
+                        msg += f"\n(방화벽 규칙 갱신 실패: {ferr or fout})"
+                messagebox.showinfo("완료", msg)
+
+            self.run_bg(worker, on_done=done)
+
+        ttk.Button(dialog, text="수정", command=submit).pack(pady=10)
 
     # ---------------- 규칙 삭제 ----------------
     def delete_selected(self):
