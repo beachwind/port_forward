@@ -29,7 +29,7 @@ import time
 from datetime import datetime
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), "port_forward_rules.json")
 
@@ -634,21 +634,32 @@ def _parse_wsl_netstat_output(out: str) -> list[dict]:
     return results
 
 
-def get_wsl_listening_ports() -> list[dict]:
+def get_wsl_listening_ports(password: str | None = None) -> tuple[list[dict], bool]:
     """WSL(리눅스) 내부에서 LISTEN 중인 TCP/UDP 포트 목록을 조회.
     `ss -tulnp`를 우선 사용하고, 사용할 수 없으면 `netstat -tulnpn`으로 대체한다.
-    반환: [{proto, state, address, port, pid, process}, ...]"""
-    code, out, err = run_command('wsl bash -c "ss -tulnpH 2>/dev/null"')
+
+    Windows에서 이 프로그램을 관리자 권한으로 실행해도 WSL 내부의 root 권한과는
+    무관하다 (Windows 관리자 권한 ≠ WSL/Linux 사용자 권한). ss/netstat이 소켓을
+    소유한 프로세스의 PID/이름을 보여주려면 WSL 내부에서 root 권한(sudo)이 필요하므로,
+    sudo를 통해 조회한다.
+
+    반환: (포트 목록, sudo 비밀번호 입력이 더 필요한지 여부)
+    [{proto, state, address, port, pid, process}, ...]"""
+    code, out, err = _wsl_sudo_command("ss -tulnpH", password)
     if code == 0 and out.strip():
         parsed = _parse_ss_output(out)
         if parsed:
-            return parsed
+            return parsed, False
+    if err == "SUDO_PASSWORD_REQUIRED":
+        return [], True
 
-    code2, out2, err2 = run_command('wsl bash -c "netstat -tulnpn 2>/dev/null"')
+    code2, out2, err2 = _wsl_sudo_command("netstat -tulnpn", password)
     if code2 == 0 and out2.strip():
-        return _parse_wsl_netstat_output(out2)
+        return _parse_wsl_netstat_output(out2), False
+    if err2 == "SUDO_PASSWORD_REQUIRED":
+        return [], True
 
-    return []
+    return [], False
 
 
 def kill_wsl_process(pid: int) -> tuple[int, str, str]:
@@ -751,26 +762,81 @@ def _parse_iptables_status(out: str) -> list[dict]:
     return rows
 
 
-def get_wsl_firewall_status() -> tuple[str, list[dict]]:
+def _wsl_sudo_command(cmd_inner: str, password: str | None = None, timeout: int = 15) -> tuple[int, str, str]:
+    """WSL 내부에서 sudo 권한이 필요한 명령을 실행한다.
+
+    ufw/iptables 상태 조회는 root 권한이 필요하다. 기존 코드는 ufw를 sudo 없이
+    실행해서(권한 부족으로) 항상 실패했던 것이 "설정한 방화벽이 표시되지 않는" 원인이었다.
+
+    1) 먼저 비밀번호 없이 `sudo -n` 으로 시도한다 (NOPASSWD sudo 가 설정되어 있거나
+       sudo 인증 캐시가 남아있는 경우 성공).
+    2) 실패했고 password 가 주어졌다면, 비밀번호를 표준입력(stdin)으로 전달하여
+       `sudo -S` 로 재시도한다. 비밀번호는 명령행 인자나 상태바 로그에는 절대
+       노출하지 않는다 (프로세스 stdin으로만 전달).
+
+    반환: (returncode, stdout, stderr)
+          비밀번호가 필요한데 주어지지 않은 경우 stderr == "SUDO_PASSWORD_REQUIRED"
+    """
+    _log_command(f'wsl bash -c "sudo -n {cmd_inner}"')
+    try:
+        result = subprocess.run(
+            ["wsl", "bash", "-c", f"sudo -n {cmd_inner} 2>&1"],
+            capture_output=True, text=True, encoding="utf-8", errors="ignore",
+            timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if result.returncode == 0:
+            return 0, result.stdout.strip(), ""
+    except Exception:
+        pass
+
+    if not password:
+        return -2, "", "SUDO_PASSWORD_REQUIRED"
+
+    # 비밀번호는 명령 문자열이 아닌 표준입력으로만 전달하여 로그/프로세스 목록에 노출되지 않도록 한다.
+    _log_command(f'wsl bash -c "sudo -S {cmd_inner}"  (비밀번호는 표준입력으로 전달, 로그에 표시되지 않음)')
+    try:
+        result = subprocess.run(
+            ["wsl", "bash", "-c", f"sudo -S {cmd_inner}"],
+            input=password + "\n",
+            capture_output=True, text=True, encoding="utf-8", errors="ignore",
+            timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        return result.returncode, result.stdout.strip(), result.stderr.strip()
+    except Exception as e:
+        return -1, "", str(e)
+
+
+def get_wsl_firewall_status(password: str | None = None) -> tuple[str, list[dict], bool]:
     """WSL 내부 방화벽 상태를 조회. ufw가 있으면 ufw를, 없으면 iptables를 확인한다.
-    반환: (상태 설명 문자열, 규칙 목록)"""
-    code, out, err = run_command('wsl bash -c "ufw status numbered 2>/dev/null"')
-    m_status = re.search(r"^Status:\s+(\S+)", out, re.MULTILINE) if code == 0 else None
-    if m_status:
-        active = m_status.group(1).lower() == "active"
-        mode = "ufw (활성)" if active else "ufw (비활성)"
-        return (mode, _parse_ufw_status(out))
+    ufw/iptables 조회 모두 root 권한이 필요하므로 sudo 를 통해 실행한다.
 
-    # ufw가 없거나 비활성 판단이 안 되면 iptables로 시도
-    # (일반 사용자는 권한이 없으므로 passwordless sudo -> 실패 시 무권한 시도 순으로 확인)
-    code2, out2, err2 = run_command(
-        'wsl bash -c "sudo -n iptables -L -n --line-numbers 2>/dev/null '
-        '|| iptables -L -n --line-numbers 2>/dev/null"'
-    )
+    반환: (상태 설명 문자열, 규칙 목록, sudo 비밀번호 입력이 더 필요한지 여부)
+    """
+    # ufw 설치 여부만 확인 (권한 불필요)
+    code_chk, out_chk, _ = run_command('wsl bash -c "command -v ufw"')
+    ufw_installed = code_chk == 0 and out_chk.strip() != ""
+
+    if ufw_installed:
+        code, out, err = _wsl_sudo_command("ufw status numbered", password)
+        if code == 0:
+            m_status = re.search(r"^Status:\s*(\S+)", out, re.MULTILINE)
+            active = bool(m_status) and m_status.group(1).lower() == "active"
+            mode = "ufw (활성)" if active else "ufw (비활성)"
+            return (mode, _parse_ufw_status(out), False)
+        if err == "SUDO_PASSWORD_REQUIRED":
+            return ("ufw 조회에는 관리자 권한(sudo)이 필요합니다.", [], True)
+        return (f"ufw 조회 실패: {(err or out or '알 수 없는 오류').strip()[:200]}", [], False)
+
+    # ufw가 없으면 iptables로 시도
+    code2, out2, err2 = _wsl_sudo_command("iptables -L -n --line-numbers", password)
     if code2 == 0 and "Chain" in out2:
-        return ("iptables", _parse_iptables_status(out2))
+        return ("iptables", _parse_iptables_status(out2), False)
+    if err2 == "SUDO_PASSWORD_REQUIRED":
+        return ("iptables 조회에는 관리자 권한(sudo)이 필요합니다. (ufw는 설치되어 있지 않음)", [], True)
 
-    return ("확인 불가 (ufw/iptables 미설치 또는 권한 부족)", [])
+    return ("확인 불가 (ufw/iptables 미설치 또는 권한 부족)", [], False)
 
 
 # ------------------------------------------------------------------
@@ -904,8 +970,22 @@ class PortForwardApp(tk.Tk):
         ttk.Button(bottom, text="전체 규칙 재적용", command=self.reapply_all).pack(side="left", padx=4)
         ttk.Button(bottom, text="선택 규칙 명령어 변환", command=self.convert_selected_to_command).pack(side="left", padx=4)
 
-        ttk.Button(bottom, text="방화벽 규칙 추가", command=self.open_firewall_add_dialog).pack(side="right", padx=4)
-        ttk.Button(bottom, text="방화벽 규칙 삭제", command=self.open_firewall_delete_dialog).pack(side="right", padx=4)
+        # 위험 작업 (portproxy 전체 초기화) - 시스템 전체에 영향을 주므로 별도 행으로 분리
+        danger = ttk.Frame(parent, padding=(10, 0, 10, 10))
+        danger.pack(fill="x")
+
+        ttk.Label(
+            danger,
+            text="⚠ 위험 작업 (시스템 전체에 영향, 되돌릴 수 없음)",
+            foreground="#c0392b",
+            font=("맑은 고딕", 9, "bold"),
+        ).pack(side="left")
+
+        ttk.Button(
+            danger,
+            text="Portproxy 전체 초기화 (netsh interface portproxy reset)",
+            command=self.reset_all_portproxy,
+        ).pack(side="left", padx=(10, 4))
 
     # ---------------- 탭 2: 포트 점유 관리 ----------------
     PORT_COLUMNS = ("proto", "address", "port", "pid", "process")
@@ -953,7 +1033,9 @@ class PortForwardApp(tk.Tk):
 
         note = ttk.Label(
             parent,
-            text="※ wsl ss(또는 netstat)로 조회합니다. 다른 사용자/루트 소유 프로세스는 권한상 이름이 보이지 않을 수 있습니다.",
+            text="※ wsl ss(또는 netstat)를 sudo로 조회합니다 (Windows 관리자 권한과 WSL 내부 root 권한은 별개이며, "
+                 "PID/프로세스명을 보려면 WSL 내부 root 권한이 필요합니다). "
+                 "NOPASSWD 설정이 없으면 조회 시 sudo 비밀번호 입력을 요청할 수 있습니다.",
             padding=(10, 0, 10, 4),
             foreground="#666666",
         )
@@ -981,13 +1063,39 @@ class PortForwardApp(tk.Tk):
             bottom, text="선택 프로세스 종료 (wsl kill -9)", command=self.kill_selected_wsl_process
         ).pack(side="left", padx=4)
 
-    def refresh_wsl_ports(self):
+    def refresh_wsl_ports(self, password: str | None = None):
         self.set_status("WSL 포트 점유 조회 중...")
 
         def worker():
-            return get_wsl_listening_ports()
+            return get_wsl_listening_ports(password)
 
-        def done(ports):
+        def done(result):
+            ports, need_password = result
+
+            if need_password:
+                self.set_status("준비됨")
+                pw = simpledialog.askstring(
+                    "sudo 권한 필요",
+                    "WSL 내부 포트 점유 PID/프로세스명을 조회하려면 root 권한(sudo)이 필요합니다.\n"
+                    "(Windows 관리자 권한과 WSL 내부 root 권한은 서로 다릅니다)\n\n"
+                    "WSL 계정의 sudo 비밀번호를 입력하세요.\n"
+                    "(비밀번호는 저장되지 않으며, 조회 명령 실행 1회에만 사용됩니다)",
+                    show="*",
+                    parent=self,
+                )
+                if pw:
+                    self.refresh_wsl_ports(password=pw)
+                else:
+                    messagebox.showinfo(
+                        "안내",
+                        "비밀번호 입력이 취소되어 PID/프로세스명을 조회하지 못했습니다.\n\n"
+                        "매번 입력하지 않으려면 WSL에서 아래처럼 passwordless sudo를 설정하세요:\n"
+                        "  sudo visudo -f /etc/sudoers.d/ss-nopasswd\n"
+                        "  → 편집기에서 한 줄 추가 (본인 계정명으로 교체):\n"
+                        "  <사용자명> ALL=(ALL) NOPASSWD: /usr/bin/ss, /usr/bin/netstat",
+                    )
+                return
+
             for item in self.wsl_port_tree.get_children():
                 self.wsl_port_tree.delete(item)
 
@@ -1082,6 +1190,30 @@ class PortForwardApp(tk.Tk):
         self.win_fw_tree.configure(yscrollcommand=win_fw_scrollbar.set)
         win_fw_scrollbar.pack(side="right", fill="y")
 
+        # 하단 버튼: 방화벽 규칙 추가/삭제 (포트 포워딩 관리 화면에서 이동됨)
+        bottom = ttk.Frame(parent, padding=10)
+        bottom.pack(fill="x")
+
+        ttk.Button(bottom, text="방화벽 규칙 추가", command=self.open_firewall_add_dialog).pack(side="left", padx=4)
+        ttk.Button(bottom, text="방화벽 규칙 삭제", command=self.open_firewall_delete_dialog).pack(side="left", padx=4)
+
+        # 위험 작업 (방화벽 규칙 전체 삭제) - 시스템 전체에 영향을 주므로 별도 행으로 분리
+        danger = ttk.Frame(parent, padding=(10, 0, 10, 10))
+        danger.pack(fill="x")
+
+        ttk.Label(
+            danger,
+            text="⚠ 위험 작업 (시스템 전체에 영향, 되돌릴 수 없음)",
+            foreground="#c0392b",
+            font=("맑은 고딕", 9, "bold"),
+        ).pack(side="left")
+
+        ttk.Button(
+            danger,
+            text="방화벽 규칙 전체 삭제 (netsh advfirewall firewall delete rule name=all)",
+            command=self.delete_all_firewall_rules,
+        ).pack(side="left", padx=(10, 4))
+
     def refresh_windows_firewall(self):
         self.set_status("Windows 방화벽 규칙 조회 중... (규칙이 많으면 다소 시간이 걸립니다)")
 
@@ -1138,7 +1270,8 @@ class PortForwardApp(tk.Tk):
         note = ttk.Label(
             parent,
             text="※ ufw가 설치되어 있으면 ufw 규칙을, 없으면 iptables 규칙을 표시합니다. "
-                 "iptables 조회는 root 권한(sudo)이 필요할 수 있습니다.",
+                 "ufw/iptables 조회 모두 root 권한이 필요해 sudo로 실행하며, "
+                 "NOPASSWD 설정이 없으면 조회 시 sudo 비밀번호 입력을 요청할 수 있습니다.",
             padding=(10, 0, 10, 4),
             foreground="#666666",
         )
@@ -1160,15 +1293,40 @@ class PortForwardApp(tk.Tk):
         self.wsl_fw_tree.configure(yscrollcommand=wsl_fw_scrollbar.set)
         wsl_fw_scrollbar.pack(side="right", fill="y")
 
-    def refresh_wsl_firewall(self):
+    def refresh_wsl_firewall(self, password: str | None = None):
         self.set_status("WSL 방화벽 상태 조회 중...")
         self.wsl_fw_status_var.set("상태: 확인 중...")
 
         def worker():
-            return get_wsl_firewall_status()
+            return get_wsl_firewall_status(password)
 
         def done(result):
-            mode, rows = result
+            mode, rows, need_password = result
+
+            if need_password:
+                self.set_status("준비됨")
+                self.wsl_fw_status_var.set(f"상태: {mode}")
+                pw = simpledialog.askstring(
+                    "sudo 권한 필요",
+                    f"{mode}\n\n"
+                    f"WSL 계정의 sudo 비밀번호를 입력하세요.\n"
+                    f"(비밀번호는 저장되지 않으며, 조회 명령 실행 1회에만 사용됩니다)",
+                    show="*",
+                    parent=self,
+                )
+                if pw:
+                    self.refresh_wsl_firewall(password=pw)
+                else:
+                    messagebox.showinfo(
+                        "안내",
+                        "비밀번호 입력이 취소되어 WSL 방화벽 상태를 조회하지 못했습니다.\n\n"
+                        "매번 입력하지 않으려면 WSL에서 아래처럼 passwordless sudo를 설정하세요:\n"
+                        "  sudo visudo -f /etc/sudoers.d/ufw-nopasswd\n"
+                        "  → 편집기에서 한 줄 추가 (본인 계정명으로 교체):\n"
+                        "  <사용자명> ALL=(ALL) NOPASSWD: /usr/sbin/ufw",
+                    )
+                return
+
             self.wsl_fw_status_var.set(f"상태: {mode} (규칙 {len(rows)}건)")
 
             for item in self.wsl_fw_tree.get_children():
@@ -1787,6 +1945,89 @@ class PortForwardApp(tk.Tk):
 
         self.run_bg(worker, on_done=done)
 
+    # ---------------- 위험 작업: 전체 초기화 ----------------
+    def reset_all_portproxy(self):
+        """`netsh interface portproxy reset` 실행.
+        이 프로그램에서 만든 규칙뿐 아니라, 시스템에 등록된 '모든' portproxy 규칙이
+        전부 삭제된다 (되돌릴 수 없음)."""
+        if not messagebox.askyesno(
+            "Portproxy 전체 초기화",
+            "정말로 모든 portproxy 규칙을 초기화하시겠습니까?\n\n"
+            "실행 명령: netsh interface portproxy reset\n\n"
+            "이 프로그램에서 등록한 규칙뿐 아니라, 시스템에 등록된 모든\n"
+            "포트포워딩(portproxy) 규칙이 전부 삭제됩니다.\n"
+            "되돌릴 수 없는 작업입니다. 계속할까요?",
+            icon="warning",
+        ):
+            return
+
+        confirm = simpledialog.askstring(
+            "최종 확인",
+            "계속하려면 아래 칸에 정확히 RESET 이라고 입력하세요.",
+            parent=self,
+        )
+        if confirm != "RESET":
+            messagebox.showinfo("취소됨", "입력값이 일치하지 않아 취소되었습니다.")
+            return
+
+        self.set_status("Portproxy 전체 초기화 중...")
+
+        def worker():
+            return run_command("netsh interface portproxy reset")
+
+        def done(result):
+            code, out, err = result
+            self.set_status("준비됨")
+            if code != 0:
+                messagebox.showerror("실패", f"초기화 실패:\n{err or out}")
+            else:
+                messagebox.showinfo("완료", "모든 portproxy 규칙이 초기화되었습니다.")
+            self.refresh_table()
+
+        self.run_bg(worker, on_done=done)
+
+    def delete_all_firewall_rules(self):
+        """`netsh advfirewall firewall delete rule name=all` 실행.
+        Windows 방화벽에 등록된 '모든' 규칙(다른 프로그램 및 OS 기본 규칙 포함)이
+        전부 삭제되는 매우 위험한 작업이다. 되돌릴 수 없다."""
+        if not messagebox.askyesno(
+            "방화벽 규칙 전체 삭제 (위험)",
+            "정말로 Windows 방화벽의 모든 규칙을 삭제하시겠습니까?\n\n"
+            "실행 명령: netsh advfirewall firewall delete rule name=all\n\n"
+            "이 프로그램에서 등록한 규칙뿐 아니라, Windows Defender 기본 규칙을\n"
+            "포함해 시스템에 등록된 '모든' 방화벽 규칙이 전부 삭제됩니다.\n"
+            "다른 프로그램의 네트워크 통신이 막히거나, 반대로 무방비 상태가 될 수\n"
+            "있으며, 되돌릴 수 없습니다 (Windows 기본 정책 복원은 별도로 해야 합니다).\n\n"
+            "정말 계속할까요?",
+            icon="warning",
+        ):
+            return
+
+        confirm = simpledialog.askstring(
+            "최종 확인 (위험)",
+            "정말 계속하려면 아래 칸에 정확히 DELETE ALL 이라고 입력하세요.",
+            parent=self,
+        )
+        if confirm != "DELETE ALL":
+            messagebox.showinfo("취소됨", "입력값이 일치하지 않아 취소되었습니다.")
+            return
+
+        self.set_status("방화벽 규칙 전체 삭제 중...")
+
+        def worker():
+            return run_command("netsh advfirewall firewall delete rule name=all")
+
+        def done(result):
+            code, out, err = result
+            self.set_status("준비됨")
+            if code != 0:
+                messagebox.showerror("실패", f"삭제 실패:\n{err or out}")
+            else:
+                messagebox.showinfo("완료", "Windows 방화벽의 모든 규칙이 삭제되었습니다.")
+                self.refresh_windows_firewall()
+
+        self.run_bg(worker, on_done=done)
+
     def convert_selected_to_command(self):
         """그리드에서 선택된 규칙(들)에 대한 netsh 명령어를 생성하여
         하단 '실행 명령어' 표시란에 보여주고 클립보드에 복사한다.
@@ -1903,6 +2144,7 @@ class PortForwardApp(tk.Tk):
                     messagebox.showerror("실패", f"방화벽 규칙 추가 실패:\n{err or out}")
                 else:
                     messagebox.showinfo("완료", f"방화벽 규칙 '{name}' 추가 완료")
+                    self.refresh_windows_firewall()
 
             self.run_bg(add_firewall_rule, name, int(port_str), on_done=done)
 
@@ -1934,6 +2176,7 @@ class PortForwardApp(tk.Tk):
                     messagebox.showerror("실패", f"방화벽 규칙 삭제 실패:\n{err or out}")
                 else:
                     messagebox.showinfo("완료", f"방화벽 규칙 '{name}' 삭제 완료")
+                    self.refresh_windows_firewall()
 
             self.run_bg(delete_firewall_rule, name, on_done=done)
 
